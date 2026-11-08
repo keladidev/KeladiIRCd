@@ -73,6 +73,8 @@ names, 12-byte usernames, 300-byte topics. Each client has a bounded output queu
 slow clients disconnect. A client sending more than 100 lines in a one-second
 window disconnects. Registration expires after 60 seconds. Idle registered
 clients receive a PING after 120 seconds and have 60 seconds to answer its token.
+Three wrong connection passwords (`464`) or failed OPER attempts close the
+connection; repeating the same wrong password does not count again.
 The server advertises `UTF8ONLY`: a non-UTF-8 line receives `FAIL <command> INVALID_UTF8`
 and is discarded. Oversized lines receive `417` and are discarded.
 

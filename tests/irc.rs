@@ -343,6 +343,25 @@ fn password_and_invalid_input() {
     assert!(client.line().contains(" FAIL * INVALID_UTF8 "));
     client.send("PING :still-connected");
     assert!(client.line().ends_with(":still-connected"));
+
+    // Three different wrong passwords close the connection; repeating one does not count.
+    let mut guesser = Client::connect(&address);
+    guesser.send(
+        "PASS one
+NICK Guesser
+USER guest 0 * :Guest",
+    );
+    assert!(guesser.line().contains(" 464 "));
+    guesser.send("PING :same-guess");
+    assert!(guesser.line().ends_with(":same-guess"));
+    for guess in ["two", "three"] {
+        guesser.send(&format!("PASS {guess}"));
+        assert!(guesser.line().contains(" 464 "));
+    }
+    assert_eq!(
+        guesser.line(),
+        "ERROR :Too many failed authentication attempts"
+    );
 }
 
 #[test]
@@ -633,6 +652,17 @@ fn relink_collision_and_unplanned_netsplit() {
     // A self-KILL must not panic while finishing the command or poison server state.
     let mut healthy = Client::connect(&addr_a);
     healthy.register("Healthy");
+
+    // Repeated failed OPER attempts close the connection.
+    for _ in 0..2 {
+        healthy.send("OPER admin wrong");
+        assert!(healthy.line().contains(" 464 "));
+    }
+    healthy.send("OPER admin wrong");
+    assert_eq!(
+        healthy.until("ERROR ").last().unwrap(),
+        "ERROR :Too many failed authentication attempts"
+    );
 }
 
 #[test]

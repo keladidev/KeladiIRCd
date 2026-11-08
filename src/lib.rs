@@ -14,6 +14,8 @@ use std::{
 const MAX_LOCAL: usize = 256;
 /// Unregistered connections from one IP, so idle sockets cannot fill the server.
 const MAX_PENDING_PER_IP: usize = 10;
+/// Wrong connection passwords or OPER attempts before a connection is closed.
+const MAX_AUTH_FAILURES: u8 = 3;
 /// Users across the network: this server and up to 32 others. Kept separate from
 /// MAX_LOCAL so a full server never has to refuse (and drop a link over) a remote user.
 const MAX_NETWORK_USERS: usize = MAX_LOCAL * 33;
@@ -189,6 +191,10 @@ struct Client {
     registered: bool,
     negotiating: bool,
     password: String,
+    /// The last rejected PASS value, so repeating it does not count again.
+    rejected_password: Option<String>,
+    /// Wrong passwords and OPER attempts on this connection.
+    auth_failures: u8,
     away: String,
     invisible: bool,
     /// User mode +R: identified to services for the current nickname.
@@ -230,6 +236,8 @@ impl Client {
             registered: false,
             negotiating: false,
             password: String::new(),
+            rejected_password: None,
+            auth_failures: 0,
             away: String::new(),
             invisible: false,
             identified: false,
@@ -427,8 +435,13 @@ impl Server {
             .as_ref()
             .is_some_and(|p| p != &c.password)
         {
-            self.numeric(id, 464, ":Password incorrect");
-            // Allow PASS to be corrected before the registration timeout expires.
+            // Allow PASS to be corrected, but only a few times, and count each new guess once.
+            if c.rejected_password.as_ref() != Some(&c.password) {
+                let password = c.password.clone();
+                self.clients.get_mut(&id).unwrap().rejected_password = Some(password);
+                self.numeric(id, 464, ":Password incorrect");
+                self.auth_failed(id);
+            }
             return;
         }
         self.clients.get_mut(&id).unwrap().registered = true;
@@ -582,6 +595,16 @@ impl Server {
             &format!(":{} PART {} :{reason}", self.clients[&id].prefix(), ch.name),
         );
         self.remove_member(id, &key);
+    }
+
+    /// Counts a wrong password or OPER attempt; too many close the connection.
+    fn auth_failed(&mut self, id: u64) {
+        let c = self.clients.get_mut(&id).unwrap();
+        c.auth_failures += 1;
+        if c.auth_failures >= MAX_AUTH_FAILURES {
+            self.send(id, "ERROR :Too many failed authentication attempts");
+            self.disconnect(id, "Too many failed authentication attempts");
+        }
     }
 
     /// Announces and applies a nickname change; callers check validity and collisions.
@@ -1316,8 +1339,8 @@ impl Server {
             }
         }
         for id in expired {
+            // The writer sends this ERROR, then closes the connection.
             self.send(id, "ERROR :Connection timed out");
-            let _ = self.clients[&id].socket.shutdown(Shutdown::Both);
             self.disconnect(id, "Connection timed out");
         }
         let idle: Vec<_> = self
@@ -1459,6 +1482,7 @@ fn accept(server: &Arc<Mutex<Server>>, mut stream: TcpStream) -> io::Result<()> 
         let mut oversized = false;
         let mut burst = Instant::now();
         let mut commands = 0;
+        let mut reason = "Connection closed";
         'connection: loop {
             match stream.read(&mut buffer) {
                 Ok(0) => break,
@@ -1479,6 +1503,7 @@ fn accept(server: &Arc<Mutex<Server>>, mut stream: TcpStream) -> io::Result<()> 
                         commands += 1;
                         if commands > 100 {
                             read_state.lock().unwrap().send(id, "ERROR :Excess flood");
+                            reason = "Excess flood";
                             break 'connection;
                         }
                         if line.last() == Some(&b'\r') {
@@ -1523,10 +1548,7 @@ fn accept(server: &Arc<Mutex<Server>>, mut stream: TcpStream) -> io::Result<()> 
                 Err(_) => break,
             }
         }
-        read_state
-            .lock()
-            .unwrap()
-            .disconnect(id, "Connection closed");
+        read_state.lock().unwrap().disconnect(id, reason);
         // The writer drains queued replies (including ERROR) before closing.
     });
     Ok(())

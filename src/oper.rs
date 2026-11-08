@@ -179,16 +179,21 @@ impl Server {
     }
 
     pub(super) fn oper_login(&mut self, id: u64, p: &[String]) {
-        let Some(oper) = self.config.opers.iter().find(|o| o.name == p[0]) else {
+        // The password is checked before the host, so only someone who knows it learns
+        // that the name exists; every failure counts towards closing the connection.
+        let Some(oper) = self
+            .config
+            .opers
+            .iter()
+            .find(|o| o.name == p[0] && o.password == p[1])
+        else {
             self.numeric(id, 464, ":Password incorrect");
+            self.auth_failed(id);
             return;
         };
         if !matches(&oper.host, &self.clients[&id].host) {
             self.numeric(id, 491, ":No O-lines for your host");
-            return;
-        }
-        if oper.password != p[1] {
-            self.numeric(id, 464, ":Password incorrect");
+            self.auth_failed(id);
             return;
         }
         self.clients.get_mut(&id).unwrap().oper = Some(oper.class);
