@@ -10,15 +10,12 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-/// Connections to this server, registered or not.
-const MAX_LOCAL: usize = 256;
+/// Default limit on connections to this server, registered or not (`--max-users`).
+const DEFAULT_MAX_USERS: usize = 256;
 /// Unregistered connections from one IP, so idle sockets cannot fill the server.
 const MAX_PENDING_PER_IP: usize = 10;
 /// Wrong connection passwords or OPER attempts before a connection is closed.
 const MAX_AUTH_FAILURES: u8 = 3;
-/// Users across the network: this server and up to 32 others. Kept separate from
-/// MAX_LOCAL so a full server never has to refuse (and drop a link over) a remote user.
-const MAX_NETWORK_USERS: usize = MAX_LOCAL * 33;
 const MAX_CHANNELS: usize = 20;
 const MAX_LINE: usize = 510;
 const QUEUE_SIZE: usize = 512;
@@ -50,6 +47,8 @@ pub struct Config {
     pub opers: Vec<OperConfig>,
     /// Services servers (such as Anope) allowed to link with the ngIRCd protocol.
     pub services: Vec<ServicesConfig>,
+    /// Connections this server accepts, registered or not.
+    pub max_users: usize,
 }
 
 impl Default for Config {
@@ -63,6 +62,7 @@ impl Default for Config {
             links: Vec::new(),
             opers: Vec::new(),
             services: Vec::new(),
+            max_users: DEFAULT_MAX_USERS,
         }
     }
 }
@@ -88,6 +88,12 @@ impl Config {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "Server description must be 1-100 bytes on one line",
+            ));
+        }
+        if !(1..=100_000).contains(&self.max_users) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Maximum users must be 1-100000",
             ));
         }
         network::validate_config(self)?;
@@ -360,6 +366,13 @@ impl Server {
         } else {
             "YamIRC server"
         }
+    }
+
+    /// Users across the network: this server and up to 32 others. Never below the
+    /// default, so a small server never refuses (and drops a link over) a remote
+    /// user; servers set above the default need the same `--max-users` network-wide.
+    pub(crate) fn network_users(&self) -> usize {
+        self.config.max_users.max(DEFAULT_MAX_USERS) * 33
     }
 
     /// Registered (local, network-wide) user counts.
@@ -1477,7 +1490,7 @@ fn accept(server: &Arc<Mutex<Server>>, mut stream: TcpStream) -> io::Result<()> 
             .clone()
             .filter(|c| !c.registered && c.host == host)
             .count();
-        let refusal = if local.count() >= MAX_LOCAL {
+        let refusal = if local.count() >= state.config.max_users {
             Some("ERROR :Server is full\r\n")
         } else if pending >= MAX_PENDING_PER_IP {
             Some("ERROR :Too many unregistered connections from your address\r\n")

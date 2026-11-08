@@ -9,8 +9,13 @@ struct Daemon(Child, Option<std::path::PathBuf>);
 
 impl Daemon {
     fn start(password: Option<&str>) -> (Self, String) {
+        Self::start_with(password, &[])
+    }
+
+    fn start_with(password: Option<&str>, extra: &[&str]) -> (Self, String) {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_yamircd"));
         cmd.args(["--listen", "127.0.0.1:0", "--name", "irc.test"])
+            .args(extra)
             .env_remove("YAMIRCD_PASSWORD")
             .stderr(Stdio::piped());
         if let Some(password) = password {
@@ -955,6 +960,14 @@ fn unregistered_connections_per_address_are_limited() {
     pending[0].register("First");
     let mut accepted = Client::connect(&address);
     accepted.register("Second");
+
+    // --max-users caps all connections to the server.
+    let (_small, address) = Daemon::start_with(None, &["--max-users", "2"]);
+    let mut first = Client::connect(&address);
+    first.register("First");
+    let mut second = Client::connect(&address);
+    second.register("Second");
+    assert_eq!(Client::connect(&address).line(), "ERROR :Server is full");
 }
 
 /// Tries to register `nick` until it succeeds; false if every attempt was banned.

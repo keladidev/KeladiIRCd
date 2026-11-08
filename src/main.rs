@@ -12,8 +12,13 @@ fn main() -> io::Result<()> {
             "--description" => config.description = value(&mut args, &arg)?,
             "--link-listen" => config.link_listen = Some(value(&mut args, &arg)?),
             "--config" => config_file = Some(value(&mut args, &arg)?),
+            "--max-users" => {
+                config.max_users = value(&mut args, &arg)?.parse().map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "--max-users needs a number")
+                })?
+            }
             "--help" | "-h" => {
-                println!("YamIRCd\nUsage: yamircd [--listen 127.0.0.1:6667] [--name irc.local] [--description \"YamIRC server\"] [--link-listen 127.0.0.1:7000] [--config yamircd.conf]\nOptional environment variable: YAMIRCD_PASSWORD (connection password)\nConfig rows: oper NAME IP_MASK local|global|override PASSWORD_ENV\n             link SERVER ADDRESS_OR_- INCOMING_IP PASSWORD_ENV\n             services SERVER INCOMING_IP PASSWORD_ENV");
+                println!("YamIRCd\nUsage: yamircd [--listen 127.0.0.1:6667] [--name irc.local] [--description \"YamIRC server\"] [--link-listen 127.0.0.1:7000] [--max-users 256] [--config yamircd.conf]\nOptional environment variable: YAMIRCD_PASSWORD (connection password)\nConfig rows: oper NAME IP_MASK local|global|override PASSWORD_ENV\n             link SERVER ADDRESS_OR_- INCOMING_IP PASSWORD_ENV\n             services SERVER INCOMING_IP PASSWORD_ENV");
                 return Ok(());
             }
             _ => {
