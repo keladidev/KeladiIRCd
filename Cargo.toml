@@ -1,0 +1,9 @@
+[package]
+name = "yamircd"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "A small standalone IRC daemon"
+license = "MIT"
+
+[dependencies]
