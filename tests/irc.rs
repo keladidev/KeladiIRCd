@@ -559,6 +559,12 @@ fn linked_servers_burst_remote_chat_operator_permissions_and_split() {
         .last()
         .unwrap()
         .contains("Carol!"));
+    // Users beyond the relinked server see the rejoin too.
+    assert!(carol
+        .until(" JOIN #network")
+        .last()
+        .unwrap()
+        .contains("Alice!"));
     alice.send("MODE Alice -o");
     assert!(alice.line().ends_with("MODE Alice :-o"));
     alice.send("KILL Alice :denied after deoper");

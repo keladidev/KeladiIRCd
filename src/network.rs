@@ -610,11 +610,14 @@ impl Server {
                         .or_insert_with(|| placeholder_channel(&name));
                     let new = ch.members.insert(id, status).is_none();
                     if bursting && new {
+                        // Burst memberships carry no JOIN line, and servers further on
+                        // receive them as ordinary updates, so this server announces the
+                        // join to every member not on the bursting side.
                         let recipients: Vec<_> = self.channels[&key]
                             .members
                             .keys()
                             .copied()
-                            .filter(|other| *other != id && self.clients[other].route.is_none())
+                            .filter(|other| *other != id && self.clients[other].route != Some(link))
                             .collect();
                         self.broadcast(
                             recipients,
