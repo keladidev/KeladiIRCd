@@ -715,7 +715,7 @@ impl Server {
                 if let Some(route) = self.clients[&target].route {
                     self.link_send(route, line);
                 } else {
-                    self.replicated(target, |server| server.force(target, &msg, &source));
+                    self.replicated(target, true, |server| server.force(target, &msg, &source));
                 }
             }
             "INVITED" if p.len() == 3 => {

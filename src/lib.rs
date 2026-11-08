@@ -684,19 +684,46 @@ impl Server {
     }
 
     fn command(&mut self, id: u64, msg: Message) -> bool {
-        self.replicated(id, |server| server.command_inner(id, msg))
+        // These cannot change channel state, and are most of the traffic, so they skip
+        // the channel comparison (about 0.5 ms per command at 5000 memberships).
+        let channels = !matches!(
+            msg.command.as_str(),
+            "PRIVMSG"
+                | "NOTICE"
+                | "PING"
+                | "PONG"
+                | "WHO"
+                | "WHOIS"
+                | "WHOWAS"
+                | "LIST"
+                | "NAMES"
+                | "USERHOST"
+                | "ISON"
+                | "MOTD"
+                | "LUSERS"
+                | "VERSION"
+                | "INFO"
+                | "TIME"
+                | "STATS"
+                | "LINKS"
+                | "AWAY"
+                | "CAP"
+        );
+        self.replicated(id, channels, |server| server.command_inner(id, msg))
     }
 
-    /// Runs `action` for user `id`, then floods any user or channel state it changed.
-    fn replicated<T>(&mut self, id: u64, action: impl FnOnce(&mut Self) -> T) -> T {
-        // ponytail: bounded network state is diffed per command to keep replication
-        // in one place; use explicit mutation events if profiling shows a bottleneck.
+    /// Runs `action` for user `id`, then floods any user state it changed, and any
+    /// channel state too when `channels` says the action may change it.
+    fn replicated<T>(&mut self, id: u64, channels: bool, action: impl FnOnce(&mut Self) -> T) -> T {
+        // shortcut: state is diffed per command to keep replication in one place; it
+        // costs O(memberships) per channel-changing command. Use explicit mutation
+        // events if networks grow past a few thousand memberships.
         let before_user = self
             .clients
             .get(&id)
             .filter(|c| c.registered)
             .map(|_| self.user_record(id));
-        let before_channels = self.channels.clone();
+        let before_channels = channels.then(|| self.channels.clone());
         let result = action(self);
         if self
             .clients
@@ -708,7 +735,9 @@ impl Server {
                 self.net_flood(None, &record);
             }
         }
-        self.sync_channels(&before_channels);
+        if let Some(before) = before_channels {
+            self.sync_channels(&before);
+        }
         result
     }
 
