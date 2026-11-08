@@ -106,6 +106,10 @@ operator privilege boundaries, link authentication, collisions, and netsplits.
 A fake services server checks the services link handshake, burst, logins,
 forced nickname changes, kills, and that services' own changes are not echoed.
 
+[`tools/irctest`](tools/irctest) runs the irctest conformance suite against
+YamIRCd, and [`tools/anope`](tools/anope) runs a real Anope in Docker with an
+end-to-end check of NickServ and ChanServ.
+
 ## Linking two servers
 
 The [link protocol](docs/LINK_PROTOCOL.md) is YamIRCd-specific, inspired by
