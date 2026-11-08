@@ -549,6 +549,16 @@ fn linked_servers_burst_remote_chat_operator_permissions_and_split() {
             .count(),
         1
     );
+    // CONNECT re-enables an incoming-only link after SQUIT; B redials on its own.
+    alice.send("CONNECT b.test");
+    assert!(alice
+        .line()
+        .contains("Incoming link accepted again from b.test"));
+    assert!(alice
+        .until(" JOIN #network")
+        .last()
+        .unwrap()
+        .contains("Carol!"));
     alice.send("MODE Alice -o");
     assert!(alice.line().ends_with("MODE Alice :-o"));
     alice.send("KILL Alice :denied after deoper");
@@ -556,7 +566,7 @@ fn linked_servers_burst_remote_chat_operator_permissions_and_split() {
     // Killing A must leave local clients on C alive after the netsplit.
     a.0.kill().unwrap();
     carol.send("PING :still-alive");
-    assert!(carol.line().ends_with(":still-alive"));
+    carol.until(":still-alive");
 }
 
 #[test]

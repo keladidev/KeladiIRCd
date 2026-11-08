@@ -235,27 +235,28 @@ impl Server {
                     return;
                 }
                 if command == "CONNECT" {
-                    if self
-                        .config
-                        .links
-                        .iter()
-                        .any(|l| l.name == p[0] && l.address.is_some())
-                    {
-                        self.disabled_links.remove(&p[0]);
-                        self.send(
-                            id,
-                            &format!(
-                                ":{} NOTICE {} :Link connection enabled for {}",
-                                self.config.name, self.clients[&id].nick, p[0]
-                            ),
-                        );
+                    // Re-enables a link after SQUIT. An incoming-only link is accepted
+                    // again when the peer reconnects; an outgoing one is redialled.
+                    let outgoing = match self.config.links.iter().find(|l| l.name == p[0]) {
+                        Some(l) => l.address.is_some(),
+                        None => {
+                            self.numeric(id, 402, &format!("{} :No link configuration", p[0]));
+                            return;
+                        }
+                    };
+                    self.disabled_links.remove(&p[0]);
+                    let text = if outgoing {
+                        "Link connection enabled for"
                     } else {
-                        self.numeric(
-                            id,
-                            402,
-                            &format!("{} :No outgoing link configuration", p[0]),
-                        );
-                    }
+                        "Incoming link accepted again from"
+                    };
+                    self.send(
+                        id,
+                        &format!(
+                            ":{} NOTICE {} :{text} {}",
+                            self.config.name, self.clients[&id].nick, p[0]
+                        ),
+                    );
                 } else if let Some((&link, _)) = self.links.iter().find(|(_, l)| l.name == p[0]) {
                     self.disabled_links.insert(p[0].clone());
                     self.drop_link(

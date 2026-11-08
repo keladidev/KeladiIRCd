@@ -75,5 +75,5 @@ to prevent delayed records from resurrecting disconnected users.
 
 Link loss removes that route's users and downstream servers, announces local
 QUITs, and forwards the split to remaining branches. Local users survive. Global
-operators can SQUIT a direct peer; it stays disabled locally until CONNECT enables
-its configured outgoing connection again. All network state is in memory.
+operators can SQUIT a direct peer; it stays disabled locally until CONNECT
+re-enables it (redialling an outgoing link, or accepting an incoming one again). All network state is in memory.

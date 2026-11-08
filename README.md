@@ -201,6 +201,8 @@ Example client commands on server A:
 
 Successful OPER sends numeric `381` and MODE `+o`; WHOIS shows numeric `313`.
 Users cannot give themselves `+o` with MODE. A global operator can `/CONNECT
-server-name` to re-enable an outgoing link disabled by SQUIT. In the example,
-B initiates the connection, so B's operator class must be `global` or `override`
-to manage that outgoing connection. Local credentials are never sent over links.
+server-name` to re-enable a link disabled by SQUIT: an outgoing link is dialled
+again, and an incoming-only link is accepted again when the peer reconnects. In
+the example, B initiates the connection, so A's operator re-enables it with
+`/CONNECT b.local` and B's own retry brings it back. Local credentials are never
+sent over links.
