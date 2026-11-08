@@ -19,18 +19,30 @@ successful link replaces the retry loop until it disconnects. Configure a tree,
 with unique server names. The handshake compares known server names to reject
 duplicate connections and cycles; later SERVER introductions also check duplicates.
 
-The outgoing side sends:
+The handshake is a mutual challenge-response, so the shared secret never crosses
+the wire and a recorded handshake cannot be replayed. Nonces are 32 lowercase hex
+digits, fresh for every connection.
 
 ```text
-YAMLINK 2 <server-name> <hex-secret> <hex-comma-separated-known-server-names>
+connecting -> YAMLINK 2 <server-name> <nonce-c> <hex-comma-separated-known-server-names>
+accepting  -> CHALLENGE <nonce-a>
+connecting -> PROOF <HMAC-SHA256(secret, "YAMLINK connect <nonce-a> <nonce-c> <connecting-name>")>
+accepting  -> YAMLINK 2 <server-name> <nonce-a> <hex-known-server-names>
+              <HMAC-SHA256(secret, "YAMLINK accept <nonce-c> <nonce-a> <accepting-name>")>
 ```
 
-The incoming side authenticates name, source IP, and secret before returning the
-same format with its own identity. Each side verifies the other before accepting
-state. Both peers must speak the same version: version 2 added channel modes,
-voice, invisible users and invitations, so it does not link with version 1. Hex encoding is framing, **not encryption**. Use private loopback links
-or an authenticated encrypted tunnel for remote links. Linked servers are fully
-trusted network administrators, including authority to announce operators.
+Proofs are lowercase hex. The accepting side checks the caller's name and source
+IP before sending its challenge, and checks the caller's proof before revealing
+anything else; the connecting side checks the accepting side's proof before
+accepting state. An attacker who answers at a configured outgoing address can
+collect one connecting proof to attack offline, so use long random secrets.
+
+Both peers must speak the same version: version 2 added channel modes, voice,
+invisible users, invitations, accounts and this handshake, so it does not link
+with version 1. Frames after the handshake are hex-framed, **not encrypted**. Use
+private loopback links or an authenticated encrypted tunnel for remote links.
+Linked servers are fully trusted network administrators, including authority to
+announce operators.
 
 Each frame ends in CRLF and is at most 8192 bytes before CRLF. Variable text
 fields use lowercase UTF-8 hex; `-` represents the empty string. NUL, CR, and LF

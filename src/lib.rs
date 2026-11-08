@@ -26,10 +26,13 @@ const MAX_WHOWAS: usize = 1024;
 /// IRCv3 capabilities offered in CAP LS.
 const CAPABILITIES: &str = "multi-prefix userhost-in-names";
 mod channel;
+mod crypto;
 mod network;
 mod oper;
 mod services;
 use channel::{status_prefix, Channel};
+#[doc(hidden)]
+pub use crypto::link_proof;
 pub use network::LinkConfig;
 pub use oper::{OperClass, OperConfig};
 pub use services::ServicesConfig;

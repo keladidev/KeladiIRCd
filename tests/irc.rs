@@ -156,6 +156,45 @@ impl Client {
     }
 }
 
+/// Connects to a link listener as `name` and answers its challenge using `secret`.
+/// Returns the socket, its reader, and the server's final greeting (empty if refused).
+fn link_handshake(
+    address: &str,
+    name: &str,
+    secret: &str,
+    known: &str,
+) -> (TcpStream, BufReader<TcpStream>, String) {
+    let hex = |text: &str| -> String { text.bytes().map(|b| format!("{b:02x}")).collect() };
+    let mut socket = TcpStream::connect(address).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut reader = BufReader::new(socket.try_clone().unwrap());
+    let ours = "0123456789abcdef0123456789abcdef";
+    socket
+        .write_all(format!("YAMLINK 2 {name} {ours} {}\r\n", hex(known)).as_bytes())
+        .unwrap();
+    let mut challenge = String::new();
+    reader.read_line(&mut challenge).unwrap();
+    let theirs = challenge
+        .trim_end()
+        .strip_prefix("CHALLENGE ")
+        .expect("Expected a CHALLENGE")
+        .to_string();
+    let proof = yamircd::link_proof(secret, "connect", &theirs, ours, name);
+    socket
+        .write_all(format!("PROOF {proof}\r\n").as_bytes())
+        .unwrap();
+    let mut hello = String::new();
+    if secret == "link-secret" {
+        reader.read_line(&mut hello).unwrap();
+        // The server's proof shows it knows the secret too.
+        let expected = yamircd::link_proof(secret, "accept", ours, &theirs, "a.test");
+        assert!(hello.trim_end().ends_with(&expected), "{hello}");
+    }
+    (socket, reader, hello)
+}
+
 #[test]
 fn real_clients_registration_chat_permissions_and_cleanup() {
     let (_daemon, address) = Daemon::start(None);
@@ -374,42 +413,31 @@ fn linked_servers_burst_remote_chat_operator_permissions_and_split() {
     alice.send("TOPIC #network :Before linking");
     alice.line();
 
-    // Reject a caller before disclosing any response or shared link credential.
-    let mut rogue = TcpStream::connect(&link_a).unwrap();
-    rogue
-        .set_read_timeout(Some(Duration::from_secs(3)))
-        .unwrap();
-    rogue
-        .write_all(b"YAMLINK 2 b.test 77726f6e67 622e74657374\r\n")
-        .unwrap();
+    // A caller with the wrong secret learns only a nonce, and its proof is refused.
+    let (rogue, mut reader, _) = link_handshake(&link_a, "b.test", "wrong-secret", "b.test");
     let mut data = [0; 32];
-    assert_eq!(rogue.read(&mut data).unwrap(), 0);
+    assert_eq!(
+        reader.read(&mut data).unwrap(),
+        0,
+        "A wrong proof was accepted"
+    );
+    rogue.shutdown(Shutdown::Both).unwrap();
 
-    let mut cyclic = TcpStream::connect(&link_a).unwrap();
-    cyclic
-        .set_read_timeout(Some(Duration::from_secs(3)))
-        .unwrap();
-    cyclic
-        .write_all(b"YAMLINK 2 b.test 6c696e6b2d736563726574 622e746573742c612e74657374\r\n")
-        .unwrap();
-    let mut reader = BufReader::new(cyclic);
-    let mut greeting = String::new();
-    reader.read_line(&mut greeting).unwrap();
-    assert!(greeting.starts_with("YAMLINK 2 a.test "));
+    // A correct proof is answered with the server's own proof, then cycles are refused.
+    let (_cyclic, mut reader, hello) =
+        link_handshake(&link_a, "b.test", "link-secret", "b.test,a.test");
+    assert!(hello.starts_with("YAMLINK 2 a.test "), "{hello}");
+    assert!(
+        !hello.contains("6c696e6b2d736563726574"),
+        "The secret crossed the wire"
+    );
     assert_eq!(
         reader.read(&mut data).unwrap(),
         0,
         "Cyclic topology was accepted"
     );
 
-    let mut forged = TcpStream::connect(&link_a).unwrap();
-    forged
-        .set_read_timeout(Some(Duration::from_secs(3)))
-        .unwrap();
-    forged
-        .write_all(b"YAMLINK 2 b.test 6c696e6b2d736563726574 622e74657374\r\n")
-        .unwrap();
-    let mut reader = BufReader::new(forged.try_clone().unwrap());
+    let (mut forged, mut reader, _) = link_handshake(&link_a, "b.test", "link-secret", "b.test");
     loop {
         let mut line = String::new();
         assert!(reader.read_line(&mut line).unwrap() > 0);

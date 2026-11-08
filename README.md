@@ -138,7 +138,9 @@ Run server B in another terminal:
 
 Clients on either server can join the same `#general` and chat. `&local` channels
 stay on their own server. Links and operator logins use plain TCP; use an encrypted
-tunnel when crossing an untrusted network. Link peers are fully trusted.
+tunnel when crossing an untrusted network. Link handshakes prove the shared secret
+with HMAC-SHA256 challenge-response, so the secret itself is never sent, but the
+traffic that follows is readable. Link peers are fully trusted.
 
 Configuration files contain one row per account or peer:
 

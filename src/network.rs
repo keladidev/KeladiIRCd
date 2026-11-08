@@ -737,6 +737,87 @@ impl Server {
 
 // Reading one byte preserves the handshake boundary and caps memory even for a
 // peer that never supplies a newline. Buffered reads keep steady-state efficient.
+/// Mutual challenge-response: each side proves it knows the shared secret with an
+/// HMAC over both sides' nonces, so the secret never crosses the wire and a
+/// recorded handshake cannot be replayed. The connecting side proves itself first,
+/// so an unauthenticated caller learns only a nonce. Returns the peer's known
+/// server names (hex-decoded, comma separated), used to reject cycles.
+///
+///   connecting: YAMLINK <version> <name> <nonce> <hex-names>
+///   accepting:  CHALLENGE <nonce>
+///   connecting: PROOF <proof of connect>
+///   accepting:  YAMLINK <version> <name> <nonce> <hex-names> <proof of accept>
+fn handshake(
+    socket: &mut TcpStream,
+    reader: &mut impl BufRead,
+    state: &Arc<Mutex<Server>>,
+    config: &LinkConfig,
+    first: Option<String>,
+) -> io::Result<String> {
+    let denied = || {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Link authentication failed",
+        )
+    };
+    let (me, known) = {
+        let state = state.lock().unwrap();
+        let mut names: Vec<_> = state.routes.keys().cloned().collect();
+        names.push(state.config.name.clone());
+        (state.config.name.clone(), encode(&names.join(",")))
+    };
+    let secret = config.password.as_str();
+    let ours = crypto::nonce();
+    if let Some(first) = first {
+        // Accepting: the caller's name and source IP already selected `config`.
+        let p: Vec<_> = first.split(' ').collect();
+        if p.len() != 5 || p[0] != "YAMLINK" || p[1] != PROTOCOL_VERSION || p[2] != config.name {
+            return Err(denied());
+        }
+        let theirs = p[3];
+        let names = decode(p[4])
+            .filter(|_| crypto::nonce_valid(theirs))
+            .ok_or_else(denied)?;
+        socket.write_all(format!("CHALLENGE {ours}\r\n").as_bytes())?;
+        let proof = read_line(reader)?;
+        let expected = crypto::link_proof(secret, "connect", &ours, theirs, &config.name);
+        if !proof
+            .strip_prefix("PROOF ")
+            .is_some_and(|proof| crypto::proof_matches(&expected, proof))
+        {
+            return Err(denied());
+        }
+        let proof = crypto::link_proof(secret, "accept", theirs, &ours, &me);
+        let hello = format!("YAMLINK {PROTOCOL_VERSION} {me} {ours} {known} {proof}\r\n");
+        socket.write_all(hello.as_bytes())?;
+        Ok(names)
+    } else {
+        socket
+            .write_all(format!("YAMLINK {PROTOCOL_VERSION} {me} {ours} {known}\r\n").as_bytes())?;
+        let challenge = read_line(reader)?;
+        let theirs = challenge
+            .strip_prefix("CHALLENGE ")
+            .filter(|nonce| crypto::nonce_valid(nonce))
+            .ok_or_else(denied)?
+            .to_string();
+        let proof = crypto::link_proof(secret, "connect", &theirs, &ours, &me);
+        socket.write_all(format!("PROOF {proof}\r\n").as_bytes())?;
+        let hello = read_line(reader)?;
+        let p: Vec<_> = hello.split(' ').collect();
+        let expected = crypto::link_proof(secret, "accept", &ours, &theirs, &config.name);
+        if p.len() != 6
+            || p[0] != "YAMLINK"
+            || p[1] != PROTOCOL_VERSION
+            || p[2] != config.name
+            || p[3] != theirs
+            || !crypto::proof_matches(&expected, p[5])
+        {
+            return Err(denied());
+        }
+        decode(p[4]).ok_or_else(denied)
+    }
+}
+
 pub(super) fn read_line(reader: &mut impl BufRead) -> io::Result<String> {
     let mut bytes = Vec::new();
     let started = Instant::now();
@@ -814,50 +895,7 @@ fn session(
                 })?
         }
     };
-    if let Some(line) = &incoming {
-        let p: Vec<_> = line.split(' ').collect();
-        if p.len() != 5
-            || p[0] != "YAMLINK"
-            || p[1] != PROTOCOL_VERSION
-            || p[2] != config.name
-            || decode(p[3]).as_deref() != Some(config.password.as_str())
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "Link authentication failed",
-            ));
-        }
-    }
-    let hello = {
-        let state = state.lock().unwrap();
-        let mut names: Vec<_> = state.routes.keys().cloned().collect();
-        names.push(state.config.name.clone());
-        format!(
-            "YAMLINK {PROTOCOL_VERSION} {} {} {}\r\n",
-            state.config.name,
-            encode(&config.password),
-            encode(&names.join(","))
-        )
-    };
-    socket.write_all(hello.as_bytes())?;
-    let incoming = if let Some(line) = incoming {
-        line
-    } else {
-        read_line(&mut reader)?
-    };
-    let hello: Vec<_> = incoming.split(' ').collect();
-    if hello.len() != 5
-        || hello[0] != "YAMLINK"
-        || hello[1] != PROTOCOL_VERSION
-        || hello[2] != config.name
-        || decode(hello[3]).as_deref() != Some(config.password.as_str())
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "Link authentication failed",
-        ));
-    }
-    let names = decode(hello[4]).ok_or(io::ErrorKind::InvalidData)?;
+    let names = handshake(&mut socket, &mut reader, &state, &config, incoming)?;
     let names: Vec<_> = names.split(',').collect();
     let (tx, rx) = mpsc::sync_channel(LINK_QUEUE);
     let id;
