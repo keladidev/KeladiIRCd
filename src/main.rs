@@ -11,6 +11,7 @@ fn main() -> io::Result<()> {
             "--name" => config.name = value(&mut args, &arg)?,
             "--description" => config.description = value(&mut args, &arg)?,
             "--link-listen" => config.link_listen = Some(value(&mut args, &arg)?),
+            "--proxy-listen" => config.proxy_listen = Some(value(&mut args, &arg)?),
             "--config" => config_file = Some(value(&mut args, &arg)?),
             "--max-users" => {
                 config.max_users = value(&mut args, &arg)?.parse().map_err(|_| {
@@ -18,7 +19,7 @@ fn main() -> io::Result<()> {
                 })?
             }
             "--help" | "-h" => {
-                println!("YamIRCd\nUsage: yamircd [--listen 127.0.0.1:6667] [--name irc.local] [--description \"YamIRC server\"] [--link-listen 127.0.0.1:7000] [--max-users 256] [--config yamircd.conf]\nOptional environment variable: YAMIRCD_PASSWORD (connection password)\nConfig rows: oper NAME IP_MASK local|global|override PASSWORD_ENV\n             link SERVER ADDRESS_OR_- INCOMING_IP PASSWORD_ENV\n             services SERVER INCOMING_IP PASSWORD_ENV");
+                println!("YamIRCd\nUsage: yamircd [--listen 127.0.0.1:6667] [--name irc.local] [--description \"YamIRC server\"] [--link-listen 127.0.0.1:7000] [--proxy-listen 127.0.0.1:6668] [--max-users 256] [--config yamircd.conf]\nOptional environment variable: YAMIRCD_PASSWORD (connection password)\nConfig rows: oper NAME IP_MASK local|global|override PASSWORD_ENV\n             link SERVER ADDRESS_OR_- INCOMING_IP PASSWORD_ENV\n             services SERVER INCOMING_IP PASSWORD_ENV\n             sasl ANOPE_HTTPD_ADDRESS JSONRPC_PATH TOKEN_ENV");
                 return Ok(());
             }
             _ => {
@@ -60,7 +61,11 @@ fn read_config(path: &str, config: &mut Config) -> io::Result<()> {
             )
         };
         // Every row ends with the name of the environment variable holding its secret.
-        let fields = if p.first() == Some(&"services") { 4 } else { 5 };
+        let fields = if matches!(p.first(), Some(&"services" | &"sasl")) {
+            4
+        } else {
+            5
+        };
         if p.len() != fields {
             return Err(invalid());
         }
@@ -69,6 +74,13 @@ fn read_config(path: &str, config: &mut Config) -> io::Result<()> {
             .filter(|s| !s.is_empty())
             .ok_or_else(invalid)?;
         match p[0] {
+            "sasl" if config.sasl.is_none() => {
+                config.sasl = Some(yamircd::SaslConfig {
+                    address: p[1].into(),
+                    path: p[2].into(),
+                    token: password,
+                })
+            }
             "services" => config.services.push(yamircd::ServicesConfig {
                 name: p[1].into(),
                 incoming_ip: p[2].parse().map_err(|_| invalid())?,

@@ -1,11 +1,14 @@
 """Writes an Anope configuration for testing YamIRCd's services link.
 
 Copies Anope's example configuration out of the test image, then changes only
-what linking needs: server name, uplink, the "ngircd" protocol module, nickname
-length, and mail/registration settings so nicknames register without email.
+what the tests need: server name, uplink, the "ngircd" protocol module, nickname
+length, mail/registration settings so nicknames register without email, the
+JSON-RPC interface YamIRCd's SASL uses (httpd on port 8080, rpc_user, a token),
+and a services operator `alice` (for HostServ SET).
 
 Usage: python -I prepare.py OUT_DIR [--image IMAGE] [--uplink HOST] [--port PORT]
                             [--password SECRET] [--name SERVICES_NAME]
+                            [--rpc-token TOKEN]
 """
 
 import argparse
@@ -21,6 +24,7 @@ parser.add_argument("--uplink", default="host.docker.internal")
 parser.add_argument("--port", type=int, default=7000)
 parser.add_argument("--password", default="services-secret")
 parser.add_argument("--name", default="services.yamircd.test")
+parser.add_argument("--rpc-token", default="rpc-secret")
 args = parser.parse_args()
 
 archive = subprocess.run(
@@ -42,6 +46,14 @@ changes = {
         ("#nicklen = 31", "nicklen = 30"),
         ("usemail = yes", "usemail = no"),
     ],
+    "modules.example.conf": [
+        ('#module\n{\n\tname = "httpd"', 'module\n{\n\tname = "httpd"'),
+        ('#module\n{\n\tname = "jsonrpc"',
+         'module\n{\n\tname = "jsonrpc"\n'
+         f'\ttoken\n\t{{\n\t\ttoken = "{args.rpc_token}"\n'
+         '\t\tmethods = "anope.checkCredentials"\n\t}'),
+        ('#module\n{\n\tname = "rpc_user"', 'module\n{\n\tname = "rpc_user"'),
+    ],
     "nickserv.example.conf": [
         ("forceemail = yes", "forceemail = no"),
         ('registration = "code"', 'registration = "none"'),
@@ -55,6 +67,8 @@ for name, pairs in changes.items():
             raise SystemExit(f"{name}: expected exactly one {old!r}; has Anope's example changed?")
         text = text.replace(old, new)
     # The main file is loaded as services.conf; the others keep the names it includes.
+    if name == "anope.example.conf":
+        text += '\noper\n{\n\tname = "alice"\n\ttype = "Services Root"\n\trequire_oper = no\n}\n'
     target = args.out / ("services.conf" if name == "anope.example.conf" else name)
     target.write_text(text, encoding="utf-8", newline="\n")
 print(f"Wrote {args.out / 'services.conf'}")

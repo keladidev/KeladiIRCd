@@ -10,7 +10,7 @@ use std::{
 const LINK_LINE: usize = 8192;
 pub(super) const LINK_QUEUE: usize = 16384;
 /// Peers must speak the same version; v2 added channel modes, voice and invisibility.
-const PROTOCOL_VERSION: &str = "2";
+const PROTOCOL_VERSION: &str = "3";
 
 #[derive(Clone)]
 pub struct LinkConfig {
@@ -179,7 +179,7 @@ impl Server {
     pub(super) fn user_record(&self, id: u64) -> String {
         let c = &self.clients[&id];
         format!(
-            "USER {} {} {} {} {} {} {} {} {}",
+            "USER {} {} {} {} {} {} {} {} {} {}",
             c.uid,
             encode(&c.nick),
             encode(&c.user),
@@ -189,7 +189,8 @@ impl Server {
             c.oper.map(OperClass::name).unwrap_or("-"),
             // Operator status travels as the class above; the modes field holds i and R.
             encode(&c.modes().replace('o', "")),
-            encode(&c.account)
+            encode(&c.account),
+            encode(&c.cloak)
         )
     }
 
@@ -207,9 +208,10 @@ impl Server {
         self.deleted_users.insert(uid.into(), Instant::now());
     }
 
-    fn channel_record(&self, ch: &Channel) -> String {
+    /// `by` is the uid of the user whose command changed the channel, or `-`.
+    fn channel_record(&self, ch: &Channel, by: &str) -> String {
         format!(
-            "CHAN {} {} {} {} {} {} {} {} {} {} {}",
+            "CHAN {} {} {} {} {} {} {} {} {} {} {} {by}",
             encode(&ch.name),
             ch.revision,
             ch.revision_by,
@@ -224,7 +226,12 @@ impl Server {
         )
     }
 
-    pub(super) fn sync_channels(&mut self, before: &BTreeMap<String, Channel>) {
+    /// Floods channel and membership changes since `before`, made by `actor`.
+    pub(super) fn sync_channels(&mut self, before: &BTreeMap<String, Channel>, actor: Option<u64>) {
+        let by = actor
+            .and_then(|id| self.clients.get(&id))
+            .map_or_else(|| "-".to_string(), |c| c.uid.clone());
+        let mut kicked = std::mem::take(&mut self.kicked);
         let keys: Vec<_> = self
             .channels
             .keys()
@@ -239,7 +246,7 @@ impl Server {
                 let ch = self.channels.get_mut(&key).unwrap();
                 ch.revision = millis().max(ch.revision.saturating_add(1));
                 ch.revision_by = self.config.name.clone();
-                self.net_flood(None, &self.channel_record(&self.channels[&key]));
+                self.net_flood(None, &self.channel_record(&self.channels[&key], &by));
             }
             let ch = &self.channels[&key];
             for (&id, &status) in &ch.members {
@@ -254,7 +261,7 @@ impl Server {
                         self.config.name.clone(),
                     );
                     let record = format!(
-                        "MEMBER {} {uid} {status} {} {}",
+                        "MEMBER {} {uid} {status} {} {} {by} -",
                         encode(&ch.name),
                         version.0,
                         version.1
@@ -279,12 +286,15 @@ impl Server {
                             millis().max(version.0.saturating_add(1)),
                             self.config.name.clone(),
                         );
+                        // A kick carries its reason; `-` means the user left.
+                        let kick = kicked.remove(&(key.clone(), id));
                         let record = format!(
-                            "MEMBER {} {} - {} {}",
+                            "MEMBER {} {} - {} {} {by} {}",
                             encode(&old.name),
                             c.uid,
                             version.0,
-                            version.1
+                            version.1,
+                            kick.as_deref().map_or_else(|| "-".into(), encode)
                         );
                         self.net_flood(None, &record);
                     }
@@ -306,14 +316,14 @@ impl Server {
             }
         }
         for ch in self.channels.values().filter(|ch| ch.name.starts_with('#')) {
-            self.link_send(link, &self.channel_record(ch));
+            self.link_send(link, &self.channel_record(ch, "-"));
             for (&id, &status) in &ch.members {
                 let uid = &self.clients[&id].uid;
                 let version = self.member_versions.get(&(fold(&ch.name), uid.clone()));
                 self.link_send(
                     link,
                     &format!(
-                        "MEMBER {} {uid} {status} {} {}",
+                        "MEMBER {} {uid} {status} {} {} - -",
                         encode(&ch.name),
                         version.map(|v| v.0).unwrap_or(ch.revision),
                         version.map(|v| v.1.as_str()).unwrap_or(&ch.revision_by)
@@ -404,7 +414,7 @@ impl Server {
                 self.routes.insert(name.into(), link);
                 self.net_flood(Some(link), line);
             }
-            "USER" if p.len() == 10 => {
+            "USER" if p.len() == 11 => {
                 if self.deleted_users.contains_key(p[1]) {
                     return Some(());
                 }
@@ -426,19 +436,16 @@ impl Server {
                     decode(p[5])?,
                     decode(p[6])?,
                 );
-                let (modes, account) = (decode(p[8])?, decode(p[9])?);
+                let (modes, account, cloak) = (decode(p[8])?, decode(p[9])?, decode(p[10])?);
                 let oper = if p[7] == "-" {
                     None
                 } else {
                     Some(OperClass::parse(p[7])?)
                 };
                 if !nick_valid(&nick)
-                    || user.is_empty()
-                    || user.len() > 12
-                    || !user
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b))
+                    || !username_valid(&user)
                     || !services::host_valid(&host)
+                    || !(cloak.is_empty() || services::host_valid(&cloak))
                     || real.len() > 128
                     || away.len() > 200
                     || p[1].len() > 120
@@ -478,9 +485,7 @@ impl Server {
                         self.remember_whowas(id);
                     }
                     let c = self.clients.get_mut(&id)?;
-                    c.nick = nick;
-                    c.away = away;
-                    c.oper = oper;
+                    (c.nick, c.user, c.cloak, c.away, c.oper) = (nick, user, cloak, away, oper);
                     (c.invisible, c.identified, c.account) = (invisible, identified, account);
                 } else {
                     if self.clients.len() >= self.network_users() {
@@ -493,13 +498,14 @@ impl Server {
                     c.route = Some(link);
                     (c.oper, c.nick, c.user, c.real, c.away) = (oper, nick, user, real, away);
                     (c.invisible, c.identified, c.account) = (invisible, identified, account);
+                    c.cloak = cloak;
                     c.registered = true;
                     self.clients.insert(id, c);
                     self.note_peak();
                 }
                 self.net_flood(Some(link), line);
             }
-            "CHAN" if p.len() == 12 => {
+            "CHAN" if p.len() == 13 => {
                 let name = decode(p[1])?;
                 let revision: u64 = p[2].parse().ok()?;
                 let origin = p[3];
@@ -518,7 +524,8 @@ impl Server {
                     .collect();
                 if topic.len() > 300
                     || topic_by.len() > 128
-                    || !flags.chars().all(|c| "imnst".contains(c))
+                    || !flags.chars().all(|c| "imnrst".contains(c))
+                    || p[12].len() > 120
                     || !(chan_key.is_empty() || channel::key_valid(&chan_key))
                     || bans.len() > channel::MAX_BANS
                     || bans.iter().any(|b| b.len() > 110)
@@ -546,9 +553,13 @@ impl Server {
                 }
                 self.net_flood(Some(link), line);
             }
-            "MEMBER" if p.len() == 6 => {
+            "MEMBER" if p.len() == 8 => {
                 let name = decode(p[1])?;
-                if !name.starts_with('#') || !channel_valid(&name) {
+                if !name.starts_with('#')
+                    || !channel_valid(&name)
+                    || p[6].len() > 120
+                    || decode(p[7])?.len() > MAX_LINE
+                {
                     return None;
                 }
                 let Some(id) = self.uid_id(p[2]) else {
@@ -704,6 +715,9 @@ impl Server {
                 let msg = parse(&action)?;
                 let valid = match (msg.command.as_str(), msg.params.as_slice()) {
                     ("JOIN" | "PART" | "NICK", [_]) => true,
+                    ("VHOST", []) => true,
+                    ("VHOST", [host]) => services::host_valid(host),
+                    ("VIDENT", [user]) => username_valid(user),
                     ("UMODE", [mode]) => matches!(mode.as_str(), "+R" | "-R"),
                     ("ACCOUNT", []) => true,
                     ("ACCOUNT", [account]) => services::account_valid(account),
@@ -1091,29 +1105,29 @@ mod tests {
         client.registered = true;
         server.clients.insert(1, client);
         // No CHAN precedes this MEMBER: the channel was deleted locally by a racing PART.
-        let line = format!("MEMBER {} b.test!1!1 0 5 b.test", encode("#X"));
+        let line = format!("MEMBER {} b.test!1!1 0 5 b.test - -", encode("#X"));
         assert!(server.link_line(7, &line, false).is_some());
         assert_eq!(server.channels["#x"].members.get(&1), Some(&0));
         assert_eq!(server.channels["#x"].name, "#X");
 
-        // v2 records carry modes, key, limit, bans and voice.
+        // Records carry modes (including services' +r), key, limit, bans and voice.
         let chan = |flags: &str| {
             format!(
-                "CHAN {} 10 b.test {} {} 5 - - 0 100 {}",
+                "CHAN {} 10 b.test {} {} 5 - - 0 100 {} -",
                 encode("#X"),
                 encode(flags),
                 encode("beer"),
                 encode("a!*@*,b!*@*")
             )
         };
-        assert!(server.link_line(7, &chan("imt"), false).is_some());
+        assert!(server.link_line(7, &chan("imrt"), false).is_some());
         let ch = &server.channels["#x"];
         assert_eq!(
             (ch.flags().as_str(), ch.key.as_str(), ch.limit),
-            ("imt", "beer", 5)
+            ("imrt", "beer", 5)
         );
         assert_eq!((ch.bans.len(), ch.created), (2, 100));
-        let voice = format!("MEMBER {} b.test!1!1 2 6 b.test", encode("#X"));
+        let voice = format!("MEMBER {} b.test!1!1 2 6 b.test - -", encode("#X"));
         assert!(server.link_line(7, &voice, false).is_some());
         assert_eq!(server.channels["#x"].members.get(&1), Some(&channel::VOICE));
         assert!(server.link_line(7, &chan("x"), false).is_none());

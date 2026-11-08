@@ -3,6 +3,7 @@
 Usage: python -I anope_e2e.py HOST PORT
 """
 
+import base64
 import socket
 import sys
 import time
@@ -12,14 +13,26 @@ failures = []
 
 
 class Client:
-    def __init__(self, nick):
+    def __init__(self, nick, sasl=None):
+        """Registers `nick`, first logging in with SASL PLAIN if `sasl` is
+        (account, password)."""
         self.nick = nick
         self.sock = socket.create_connection((HOST, PORT), timeout=1)
         self.buf = b""
         self.pending = []
+        if sasl:
+            self.send("CAP REQ sasl")
         self.send(f"NICK {nick}")
         self.send(f"USER {nick} 0 * :{nick} tester")
-        self.wait(" 376 ")
+        self.welcome = []
+        if sasl:
+            self.welcome += self.wait("ACK :sasl")
+            self.send("AUTHENTICATE PLAIN")
+            self.welcome += self.wait("AUTHENTICATE +")
+            plain = f"\0{sasl[0]}\0{sasl[1]}".encode()
+            self.send("AUTHENTICATE " + base64.b64encode(plain).decode())
+            self.send("CAP END")
+        self.welcome += self.wait(" 376 ")
 
     def send(self, line):
         print(f"{self.nick} -> {line}")
@@ -87,6 +100,7 @@ alice.wait(" 366 ")
 alice.send("PRIVMSG ChanServ :REGISTER #room")
 reply = alice.wait("NOTICE alice", 10) + alice.lines(2)
 check("ChanServ registers the channel", any("ChanServ" in l and "registered" in l.lower() for l in reply))
+check("ChanServ marks the channel registered (+r)", any("MODE #room +r" in l for l in reply))
 bob = Client("bob")
 bob.send("JOIN #room")
 bob.wait(" 366 ")
@@ -121,6 +135,30 @@ carol.send("PRIVMSG NickServ :IDENTIFY hunter2-secret")
 ident = carol.lines(4)
 check("IDENTIFY logs a new connection in", any(" 900 alice " in l for l in ident))
 check("IDENTIFY sets +R", any("MODE alice :+R" in l for l in ident))
+
+# HostServ (alice is a services operator in prepare.py's configuration).
+carol.send("PRIVMSG HostServ :SET alice alice.vhost.test")
+vhost = carol.lines(3)
+check("HostServ SET applies the vhost (396)",
+      any(" 396 alice alice.vhost.test " in l for l in vhost))
+watcher = Client("watcher")
+watcher.send("WHOIS alice")
+whois = watcher.wait(" 318 ")
+check("Others see the vhost in WHOIS",
+      any(" 311 watcher alice ~alice alice.vhost.test " in l for l in whois))
+
+# SASL PLAIN, checked by YamIRCd through Anope's JSON-RPC interface.
+dave = Client("dave", sasl=("alice", "hunter2-secret"))
+check("SASL PLAIN succeeds (903)", any(" 903 dave " in l for l in dave.welcome))
+check("SASL logs in before registration (900)",
+      any(" 900 dave " in l and " alice :" in l for l in dave.welcome))
+dave.send("PRIVMSG NickServ :LOGOUT")
+out = dave.lines(3)
+check("Services know the SASL login (LOGOUT answers 901)", any(" 901 dave " in l for l in out))
+eve = Client("eve", sasl=("alice", "wrong-password"))
+check("SASL with a wrong password fails (904)", any(" 904 eve " in l for l in eve.welcome))
+check("A failed SASL client still registers unauthenticated",
+      any(" 001 eve " in l for l in eve.welcome))
 
 print()
 print("FAILED: " + ", ".join(failures) if failures else "ALL CHECKS PASSED")

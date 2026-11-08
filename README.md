@@ -17,8 +17,9 @@ nickname and join `#general`. The default listener is loopback; use
 
 Set `YAMIRCD_PASSWORD` to require a connection password via `PASS`. The password
 is read from the environment rather than a command-line argument. This is plain
-TCP: use a TLS terminator for encrypted connections. No accounts or SASL are
-implemented.
+TCP: for TLS, put a proxy such as stunnel in front, as [docs/TLS.md](docs/TLS.md)
+describes; `--proxy-listen` accepts its connections with the users' real
+addresses. Accounts and SASL come from linked services (Anope).
 
 On this workspace's local toolchain, PowerShell can run:
 
@@ -33,12 +34,14 @@ $env:CARGO_HOME = Join-Path $PWD '.tools/cargo'
 - `NICK`, `USER`, `PASS`, `CAP LS/LIST/REQ/END`, `PING`, `PONG`, `QUIT`.
 - Registration replies `001`–`005`, `LUSERS`, and `MOTD`; CAP negotiation delays
   registration until `CAP END`. The IRCv3 capabilities `multi-prefix` and
-  `userhost-in-names` are offered.
+  `userhost-in-names` are offered, and `sasl` (PLAIN) when a `sasl` row is
+  configured (see Linking IRC services).
 - `JOIN` (including keys, multiple channels and `JOIN 0`), `PART`, `TOPIC`,
   `NAMES`, `LIST`, `INVITE`, and `KICK`.
 - Channel modes: `+b` bans (up to 60 masks, listed with `MODE #channel b`), `+k`
   key, `+l` limit, `+i` invite-only, `+m` moderated, `+n` no external messages,
-  `+s` secret, `+t` protected topic, and member status `+o`/`+v` (`@`/`+`).
+  `+s` secret, `+t` protected topic, `+r` registered (set only by services), and
+  member status `+o`/`+v` (`@`/`+`).
   Several changes are echoed as one MODE line; invalid keys or limits get `696`.
 - New channels start with `+nt`; the first member receives `@` operator status.
   Channel operators may change modes and protected topics, or kick. Operator
@@ -81,11 +84,18 @@ The server advertises `UTF8ONLY`: a non-UTF-8 line receives `FAIL <command> INVA
 and is discarded. Oversized lines receive `417` and are discarded.
 
 State is in memory and disappears on restart. This is not a complete UnrealIRCd
-implementation. Built-in services, SASL, native TLS, other user modes, ban
+implementation. Built-in services, SASL without Anope, SASL mechanisms other
+than PLAIN, native TLS (see [docs/TLS.md](docs/TLS.md)), other user modes, ban
 exceptions (`+e`), invite exceptions (`+I`), extended bans, WHOX, MONITOR,
 and other administrative commands are not implemented.
 Unknown commands or modes receive the corresponding numeric errors. Message tags
-are not negotiated or relayed. The thread-per-client design targets small networks.
+are not negotiated or relayed.
+
+Each user takes two threads and one shared state lock. Measured on Windows with
+the test clients on the same machine (`tools/load`): 4000 idle users took about
+450 MB and 8000 threads, with channel messages still delivered in 0.1-0.2 ms;
+250 users all in one channel at 100 messages a second (25,000 deliveries a
+second) used 17% of one core with 1.3 ms median delay. Larger counts are untested.
 
 [irctest](https://github.com/progval/irctest), run with the filter other servers
 use (`-m "not services and not implementation-specific and not deprecated"`),
@@ -144,7 +154,8 @@ Run server B in another terminal:
 
 Clients on either server can join the same `#general` and chat. `&local` channels
 stay on their own server. Links and operator logins use plain TCP; use an encrypted
-tunnel when crossing an untrusted network. Link handshakes prove the shared secret
+tunnel when crossing an untrusted network ([docs/TLS.md](docs/TLS.md) shows
+stunnel for links). Link handshakes prove the shared secret
 with HMAC-SHA256 challenge-response, so the secret itself is never sent, but the
 traffic that follows is readable. Link peers are fully trusted.
 
@@ -154,6 +165,7 @@ Configuration files contain one row per account or peer:
 oper NAME IP_MASK CLASS PASSWORD_ENV
 link SERVER OUTGOING_ADDRESS_OR_- INCOMING_IP PASSWORD_ENV
 services SERVER INCOMING_IP PASSWORD_ENV
+sasl ANOPE_HTTPD_ADDRESS JSONRPC_PATH TOKEN_ENV
 ```
 
 `IP_MASK` accepts `*` and `?` over textual client IPs. `INCOMING_IP` is an exact
@@ -178,15 +190,29 @@ In Anope's `services.conf`, set `serverinfo` `name` to the same server name, poi
 and set `networkinfo` `nicklen = 30`. Services may link to any server of a YamIRCd
 network; users on every server see the service bots and can use them.
 
-Tested with Anope 2.1.27: nickname registration, IDENTIFY and LOGOUT, `+R` and the
-account shown in WHOIS (`330`, `307`, `900`/`901`), ChanServ channel registration
-and modes, NickServ RECOVER (KILL and SVSNICK), service bots in channels, and
-OperServ AKILL (sent as GLINE; OperServ requires IRC operator status).
-Service bots act with operator-override privileges. Not supported: SASL and
-SVSJOIN (Anope's ngIRCd module lacks them, so `ns_sasl*` and `ns_ajoin` do not
-load), virtual hosts (HostServ), and the registered channel mode `+r`.
-Services learn about kicks of ordinary users as PART, and about mode changes as
-coming from the user's server.
+Anope's ngIRCd module has no SASL, so YamIRCd checks SASL PLAIN logins itself
+through Anope's JSON-RPC interface (`anope.checkCredentials`), then tells
+services the user's account as usual. In Anope's `modules.conf`, load `httpd`
+(keep it on loopback or a private network), `jsonrpc` with a token allowed the
+`anope.checkCredentials` method, and `rpc_user`; then add a row with Anope's httpd
+address, the page (`/jsonrpc`), and a variable holding the same token:
+
+```text
+sasl 127.0.0.1:8080 /jsonrpc YAMIRCD_ANOPE_RPC_TOKEN
+```
+
+Tested with Anope 2.1.27 (`tools/anope`): nickname registration, IDENTIFY and
+LOGOUT, `+R` and the account shown in WHOIS (`330`, `307`, `900`/`901`), SASL
+PLAIN, ChanServ channel registration (`+r`) and modes, HostServ vhosts (`396`;
+operators and the user themself see the real host in WHOIS `378`), NickServ
+RECOVER (KILL and SVSNICK), service bots in channels, kicks and mode changes
+reported from the user who made them, and OperServ AKILL (sent as GLINE;
+OperServ requires IRC operator status). Service bots act with operator-override
+privileges.
+
+Not supported: SVSJOIN and SVSPART, so NickServ AJOIN and OperServ SVSJOIN do not
+work. Anope's ngIRCd module never sends them (it does not mark the protocol as
+able to), so no change in YamIRCd can enable them.
 
 ## IRC operator privileges
 

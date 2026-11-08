@@ -141,6 +141,18 @@ impl Server {
                     );
                 }
             }
+            // HostServ: a displayed host (empty restores the real one), and username.
+            "VHOST" | "VIDENT" => {
+                let c = self.clients.get_mut(&target).unwrap();
+                if msg.command == "VHOST" {
+                    c.cloak = param.into();
+                } else {
+                    c.user = param.into();
+                }
+                let c = &self.clients[&target];
+                let line = format!("{} :is now your displayed host", c.shown());
+                self.numeric(target, 396, &line);
+            }
             "UMODE" => {
                 let on = param == "+R";
                 let c = self.clients.get_mut(&target).unwrap();

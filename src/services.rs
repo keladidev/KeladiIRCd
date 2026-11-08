@@ -204,6 +204,11 @@ impl View {
         lines
     }
 
+    /// The nickname services know for the user `uid`, or this server's name.
+    fn source<'a>(&'a self, uid: &str, me: &'a str) -> &'a str {
+        self.users.get(uid).map_or(me, |u| u.nick.as_str())
+    }
+
     /// The service bot that relays a channel's messages to services, so a message
     /// reaching several bots in one channel is passed on once.
     fn relay_bot(&self, key: &str) -> Option<&str> {
@@ -229,7 +234,7 @@ impl View {
                     out.push(format!(":{me} SERVER {name} 2 {token} :YamIRC server"));
                 }
             }
-            ("USER", 10) => {
+            ("USER", 11) => {
                 let uid = p[1];
                 let home = uid.split('!').next()?.to_string();
                 let (nick, user, host, real) =
@@ -338,7 +343,8 @@ impl View {
                     self.forget_user(&uid);
                 }
             }
-            ("CHAN", 12) => {
+            ("CHAN", 13) => {
+                let by = self.source(p[12], me).to_string();
                 let name = decode(p[1])?;
                 let bans = decode(p[11])?;
                 let new = SeenChannel {
@@ -368,7 +374,7 @@ impl View {
                 });
                 if !old.members.is_empty() {
                     let mut changes = Vec::new();
-                    for c in "imnst".chars() {
+                    for c in "imnrst".chars() {
                         if old.flags.contains(c) != new.flags.contains(c) {
                             changes.push((new.flags.contains(c), c, None));
                         }
@@ -393,7 +399,7 @@ impl View {
                     for ban in new.bans.iter().filter(|b| !old.bans.contains(b)) {
                         changes.push((true, 'b', Some(ban.clone())));
                     }
-                    out.extend(mode_lines(me, &old.name, &changes));
+                    out.extend(mode_lines(&by, &old.name, &changes));
                     if old.topic != new.topic {
                         out.push(format!(":{setter} TOPIC {} :{}", old.name, new.topic));
                     }
@@ -401,10 +407,11 @@ impl View {
                 (old.flags, old.key, old.limit, old.bans, old.topic) =
                     (new.flags, new.key, new.limit, new.bans, new.topic);
             }
-            ("MEMBER", 6) => {
+            ("MEMBER", 8) => {
                 let name = decode(p[1])?;
                 let key = fold(&name);
                 let uid = p[2];
+                let by = self.source(p[6], me).to_string();
                 let seen = self.users.get(uid)?;
                 let (nick, bot) = (seen.nick.clone(), seen.home == self.name);
                 let ch = self
@@ -417,7 +424,9 @@ impl View {
                 if p[3] == "-" {
                     if ch.members.remove(uid).is_some() {
                         // A bot leaves only when removed by someone else, so report a kick.
-                        out.push(if bot {
+                        out.push(if p[7] != "-" {
+                            format!(":{by} KICK {} {nick} :{}", ch.name, decode(p[7])?)
+                        } else if bot {
                             format!(":{me} KICK {} {nick} :Removed from channel", ch.name)
                         } else {
                             format!(":{nick} PART {}", ch.name)
@@ -436,11 +445,12 @@ impl View {
                                 out.extend(self.chaninfo(me, ch));
                             }
                             let ch = &self.channels[&key];
+                            // Status given on joining (op for a channel's creator) is the server's.
                             out.extend(mode_lines(me, &ch.name, &status_changes(0, status, &nick)));
                         }
                         Some(old) if old != status => {
                             out.extend(mode_lines(
-                                me,
+                                &by,
                                 &ch.name,
                                 &status_changes(old, status, &nick),
                             ));
@@ -627,7 +637,7 @@ impl Server {
         self.set_quiet(link, msg.command != "SVSNICK");
         let before = self.channels.clone();
         self.services_command(link, actor, &msg);
-        self.sync_channels(&before);
+        self.sync_channels(&before, Some(actor));
         self.set_quiet(link, false);
         true
     }
@@ -732,6 +742,21 @@ impl Server {
                     }
                 }
             }
+            // Anope's names: `cloakhost` is the displayed host, `user` the username.
+            ("METADATA", true) if p.len() >= 3 && p[1] == "cloakhost" => {
+                if let Some(target) = self.user_for_services(&p[0]) {
+                    if p[2].is_empty() || host_valid(&p[2]) {
+                        self.services_force(link, target, &format!("VHOST {}", p[2]));
+                    }
+                }
+            }
+            ("METADATA", true) if p.len() >= 3 && p[1] == "user" => {
+                if let Some(target) = self.user_for_services(&p[0]) {
+                    if username_valid(&p[2]) && p[2] != self.clients[&target].user {
+                        self.services_force(link, target, &format!("VIDENT {}", p[2]));
+                    }
+                }
+            }
             ("METADATA", true) if p.len() >= 2 && p[1] == "accountname" => {
                 if let Some(target) = self.user_for_services(&p[0]) {
                     let account = text(2);
@@ -806,12 +831,7 @@ impl Server {
         modes: &str,
         real: &str,
     ) {
-        let user_valid = !user.is_empty()
-            && user.len() <= 12
-            && user
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b));
-        if !nick_valid(nick) || !user_valid || !host_valid(host) {
+        if !nick_valid(nick) || !username_valid(user) || !host_valid(host) {
             eprintln!("Ignoring invalid services user {nick}");
             return;
         }

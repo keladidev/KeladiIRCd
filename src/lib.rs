@@ -4,7 +4,7 @@ use std::{
     net::{Shutdown, TcpListener, TcpStream},
     sync::{
         mpsc::{self, SyncSender},
-        Arc, Mutex,
+        Arc, Mutex, Weak,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -27,12 +27,14 @@ mod channel;
 mod crypto;
 mod network;
 mod oper;
+mod sasl;
 mod services;
 use channel::{status_prefix, Channel};
 #[doc(hidden)]
 pub use crypto::link_proof;
 pub use network::LinkConfig;
 pub use oper::{OperClass, OperConfig};
+pub use sasl::SaslConfig;
 pub use services::ServicesConfig;
 
 #[derive(Clone)]
@@ -43,12 +45,17 @@ pub struct Config {
     pub description: String,
     pub password: Option<String>,
     pub link_listen: Option<String>,
+    /// A client listener for a TLS proxy: each connection starts with a PROXY
+    /// protocol v1 header giving the user's real address.
+    pub proxy_listen: Option<String>,
     pub links: Vec<LinkConfig>,
     pub opers: Vec<OperConfig>,
     /// Services servers (such as Anope) allowed to link with the ngIRCd protocol.
     pub services: Vec<ServicesConfig>,
     /// Connections this server accepts, registered or not.
     pub max_users: usize,
+    /// SASL logins checked against Anope's JSON-RPC interface.
+    pub sasl: Option<SaslConfig>,
 }
 
 impl Default for Config {
@@ -59,10 +66,12 @@ impl Default for Config {
             description: "YamIRC server".into(),
             password: None,
             link_listen: None,
+            proxy_listen: None,
             links: Vec::new(),
             opers: Vec::new(),
             services: Vec::new(),
             max_users: DEFAULT_MAX_USERS,
+            sasl: None,
         }
     }
 }
@@ -94,6 +103,17 @@ impl Config {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "Maximum users must be 1-100000",
+            ));
+        }
+        if self.sasl.as_ref().is_some_and(|s| {
+            !s.path.starts_with('/')
+                || [&s.address, &s.path, &s.token]
+                    .iter()
+                    .any(|v| v.is_empty() || v.len() > 200 || v.contains([' ', '\0', '\r', '\n']))
+        }) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid sasl configuration",
             ));
         }
         network::validate_config(self)?;
@@ -181,6 +201,15 @@ fn parse(line: &str) -> Option<Message> {
     })
 }
 
+/// Usernames: 1-12 ASCII letters, digits, `_`, `-` or `.`.
+fn username_valid(user: &str) -> bool {
+    !user.is_empty()
+        && user.len() <= 12
+        && user
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b))
+}
+
 fn truncate(text: &str, limit: usize) -> &str {
     let mut end = text.len().min(limit);
     while !text.is_char_boundary(end) {
@@ -198,6 +227,8 @@ struct Client {
     user: String,
     real: String,
     host: String,
+    /// Displayed host set by services (HostServ); empty shows the real one.
+    cloak: String,
     registered: bool,
     negotiating: bool,
     password: String,
@@ -216,6 +247,11 @@ struct Client {
     /// Negotiated IRCv3 capabilities (local clients only).
     multi_prefix: bool,
     userhost_names: bool,
+    cap_sasl: bool,
+    /// Base64 received so far in a SASL exchange, once a mechanism was chosen.
+    sasl: Option<String>,
+    /// Waiting for services to check SASL credentials; registration waits too.
+    sasl_checking: bool,
     /// Folded names of channels this user was invited to (local clients only).
     invites: BTreeSet<String>,
     tx: SyncSender<String>,
@@ -243,6 +279,7 @@ impl Client {
             user: String::new(),
             real: String::new(),
             host,
+            cloak: String::new(),
             registered: false,
             negotiating: false,
             password: String::new(),
@@ -255,6 +292,9 @@ impl Client {
             server: false,
             multi_prefix: false,
             userhost_names: false,
+            cap_sasl: false,
+            sasl: None,
+            sasl_checking: false,
             invites: BTreeSet::new(),
             tx,
             socket,
@@ -268,7 +308,16 @@ impl Client {
         if self.server {
             return self.home.clone();
         }
-        format!("{}!~{}@{}", self.nick, self.user, shown_host(&self.host))
+        format!("{}!~{}@{}", self.nick, self.user, self.shown())
+    }
+
+    /// The host others see: the services-set vhost, or the real one.
+    fn shown(&self) -> String {
+        if self.cloak.is_empty() {
+            shown_host(&self.host)
+        } else {
+            shown_host(&self.cloak)
+        }
     }
 
     /// User modes as letters, e.g. `iRo`.
@@ -315,12 +364,16 @@ struct Server {
     handshakes: usize,
     deleted_users: BTreeMap<String, Instant>,
     member_versions: BTreeMap<(String, String), (u64, String)>,
+    /// Reasons for kicks made since the last channel sync, by (channel, user).
+    kicked: BTreeMap<(String, u64), String>,
     max_local: usize,
     max_global: usize,
     /// Most recent first, capped at MAX_WHOWAS.
     whowas: VecDeque<Whowas>,
     /// KLINEs and GLINEs, including expired ones until the next tick.
     server_bans: Vec<bans::ServerBan>,
+    /// This server's own handle, for threads that report back (SASL checks).
+    weak: Weak<Mutex<Server>>,
 }
 
 impl Server {
@@ -337,10 +390,12 @@ impl Server {
             handshakes: 0,
             deleted_users: BTreeMap::new(),
             member_versions: BTreeMap::new(),
+            kicked: BTreeMap::new(),
             max_local: 0,
             max_global: 0,
             whowas: VecDeque::new(),
             server_bans: Vec::new(),
+            weak: Weak::new(),
         }
     }
 
@@ -352,7 +407,7 @@ impl Server {
         self.whowas.push_front(Whowas {
             nick: c.nick.clone(),
             user: c.user.clone(),
-            host: shown_host(&c.host),
+            host: c.shown(),
             real: c.real.clone(),
             server: c.home.clone(),
         });
@@ -446,7 +501,12 @@ impl Server {
 
     fn register(&mut self, id: u64) {
         let c = &self.clients[&id];
-        if c.registered || c.negotiating || c.nick.is_empty() || c.user.is_empty() {
+        if c.registered
+            || c.negotiating
+            || c.sasl_checking
+            || c.nick.is_empty()
+            || c.user.is_empty()
+        {
             return;
         }
         if self
@@ -486,9 +546,9 @@ impl Server {
         self.numeric(
             id,
             4,
-            &format!("{} yamircd-0.1.0 io biklmnostv bklov", self.config.name),
+            &format!("{} yamircd-0.1.0 ioR biklmnorstv bklov", self.config.name),
         );
-        self.numeric(id, 5, &format!("CASEMAPPING=rfc1459 CHANTYPES=#& CHANMODES=b,k,l,imnst PREFIX=(ov)@+ MAXLIST=b:{} NICKLEN=30 CHANNELLEN=50 USERLEN=12 TOPICLEN=300 CHANLIMIT=#&:20 NETWORK=YamIRC UTF8ONLY :are supported by this server", channel::MAX_BANS));
+        self.numeric(id, 5, &format!("CASEMAPPING=rfc1459 CHANTYPES=#& CHANMODES=b,k,l,imnrst PREFIX=(ov)@+ MAXLIST=b:{} NICKLEN=30 CHANNELLEN=50 USERLEN=12 TOPICLEN=300 CHANLIMIT=#&:20 NETWORK=YamIRC UTF8ONLY :are supported by this server", channel::MAX_BANS));
         self.lusers(id);
         self.motd(id);
         self.net_flood(None, &self.user_record(id));
@@ -721,6 +781,7 @@ impl Server {
                 | "LINKS"
                 | "AWAY"
                 | "CAP"
+                | "AUTHENTICATE"
         );
         self.replicated(id, channels, |server| server.command_inner(id, msg))
     }
@@ -749,7 +810,7 @@ impl Server {
             }
         }
         if let Some(before) = before_channels {
-            self.sync_channels(&before);
+            self.sync_channels(&before, Some(id));
         }
         result
     }
@@ -771,7 +832,10 @@ impl Server {
             return true;
         }
         if !self.clients[&id].registered
-            && !matches!(command, "CAP" | "PASS" | "NICK" | "USER" | "PING" | "PONG")
+            && !matches!(
+                command,
+                "CAP" | "PASS" | "NICK" | "USER" | "PING" | "PONG" | "AUTHENTICATE"
+            )
         {
             self.numeric(id, 451, ":You have not registered");
             return true;
@@ -780,7 +844,7 @@ impl Server {
             "NICK" | "PASS" | "PING" | "CAP" | "JOIN" | "PART" | "TOPIC" | "MODE" | "WHOIS" => 1,
             "KICK" | "INVITE" | "OPER" | "SAJOIN" | "SAPART" | "SAMODE" => 2,
             "WALLOPS" | "SQUIT" | "CONNECT" | "USERHOST" | "ISON" | "KILL" | "WHOWAS" => 1,
-            "KLINE" | "GLINE" => 1,
+            "KLINE" | "GLINE" | "AUTHENTICATE" => 1,
             "USER" => 4,
             _ => 0,
         };
@@ -794,6 +858,7 @@ impl Server {
         }
         match command {
             "OPER" => self.oper_login(id, &p),
+            "AUTHENTICATE" => self.authenticate(id, &p[0]),
             "KILL" | "WALLOPS" | "SQUIT" | "CONNECT" | "SAJOIN" | "SAPART" | "SAMODE" | "KLINE"
             | "GLINE" => self.oper_command(id, command, &p),
             "LINKS" => {
@@ -812,17 +877,23 @@ impl Server {
                 self.numeric(id, 365, "* :End of /LINKS list");
             }
             "CAP" => {
+                let offered = if self.config.sasl.is_some() {
+                    format!("{CAPABILITIES} sasl")
+                } else {
+                    CAPABILITIES.into()
+                };
                 let sub = p[0].to_ascii_uppercase();
                 let c = self.clients.get_mut(&id).unwrap();
                 if !c.registered && matches!(sub.as_str(), "LS" | "REQ") {
                     c.negotiating = true;
                 }
                 let reply = match sub.as_str() {
-                    "LS" => Some(format!("LS :{CAPABILITIES}")),
+                    "LS" => Some(format!("LS :{offered}")),
                     "LIST" => {
                         let enabled: Vec<_> = [
                             ("multi-prefix", c.multi_prefix),
                             ("userhost-in-names", c.userhost_names),
+                            ("sasl", c.cap_sasl),
                         ]
                         .iter()
                         .filter(|(_, on)| *on)
@@ -835,17 +906,17 @@ impl Server {
                         let wanted: Vec<_> = p[1].split(' ').filter(|s| !s.is_empty()).collect();
                         let known = !wanted.is_empty()
                             && wanted.iter().all(|cap| {
-                                CAPABILITIES
+                                offered
                                     .split(' ')
                                     .any(|offered| offered == cap.trim_start_matches('-'))
                             });
                         if known {
                             for cap in &wanted {
                                 let enable = !cap.starts_with('-');
-                                if cap.trim_start_matches('-') == "multi-prefix" {
-                                    c.multi_prefix = enable;
-                                } else {
-                                    c.userhost_names = enable;
+                                match cap.trim_start_matches('-') {
+                                    "multi-prefix" => c.multi_prefix = enable,
+                                    "sasl" => c.cap_sasl = enable,
+                                    _ => c.userhost_names = enable,
                                 }
                             }
                         }
@@ -1010,14 +1081,17 @@ impl Server {
                         self.numeric(
                             id,
                             311,
-                            &format!(
-                                "{} ~{} {} * :{}",
-                                c.nick,
-                                c.user,
-                                shown_host(&c.host),
-                                c.real
-                            ),
+                            &format!("{} ~{} {} * :{}", c.nick, c.user, c.shown(), c.real),
                         );
+                        if !c.cloak.is_empty() && (other == id || self.clients[&id].oper.is_some())
+                        {
+                            let real = shown_host(&c.host);
+                            self.numeric(
+                                id,
+                                378,
+                                &format!("{} :is connecting from *@{real} {real}", c.nick),
+                            );
+                        }
                         let multi = self.clients[&id].multi_prefix;
                         let channels = self
                             .channels
@@ -1178,7 +1252,7 @@ impl Server {
                             if c.oper.is_some() { "*" } else { "" },
                             if c.away.is_empty() { '+' } else { '-' },
                             c.user,
-                            shown_host(&c.host)
+                            c.shown()
                         )
                     })
                     .collect();
@@ -1214,7 +1288,7 @@ impl Server {
             &format!(
                 "{channel} ~{} {} {} {} {}{}{} :0 {}",
                 c.user,
-                shown_host(&c.host),
+                c.shown(),
                 c.home,
                 c.nick,
                 if c.away.is_empty() { "H" } else { "G" },
@@ -1358,17 +1432,22 @@ impl Server {
                 );
                 continue;
             }
+            let reason = p
+                .get(2)
+                .filter(|r| !r.is_empty())
+                .unwrap_or(&self.clients[&id].nick)
+                .clone();
             self.broadcast(
                 ch.members.keys().copied(),
                 &format!(
-                    ":{} KICK {} {} :{}",
+                    ":{} KICK {} {} :{reason}",
                     self.clients[&id].prefix(),
                     ch.name,
                     self.clients[&other].nick,
-                    p.get(2).unwrap_or(&self.clients[&id].nick)
                 ),
             );
             self.remove_member(other, &key);
+            self.kicked.insert((key.clone(), other), reason);
             if other == id {
                 break;
             }
@@ -1447,7 +1526,24 @@ pub fn serve(listener: TcpListener, config: Config) -> io::Result<()> {
     // ponytail: one state lock and two threads/client, capped at 256 connections;
     // move to an async event loop if this standalone server needs larger scale.
     let server = Arc::new(Mutex::new(Server::new(config)));
+    server.lock().unwrap().weak = Arc::downgrade(&server);
     network::start(Arc::clone(&server))?;
+    if let Some(address) = server.lock().unwrap().config.proxy_listen.clone() {
+        let proxy = TcpListener::bind(&address)?;
+        eprintln!("YamIRCd PROXY listener on {}", proxy.local_addr()?);
+        let server = Arc::clone(&server);
+        thread::spawn(move || {
+            for stream in proxy.incoming().flatten() {
+                // Its own thread, so a proxy slow to send the header delays no one else.
+                let server = Arc::clone(&server);
+                thread::spawn(move || {
+                    if let Err(err) = accept(&server, stream, true) {
+                        eprintln!("Proxied connection dropped during setup: {err}");
+                    }
+                });
+            }
+        });
+    }
     let weak = Arc::downgrade(&server);
     thread::spawn(move || loop {
         thread::sleep(Duration::from_secs(1));
@@ -1459,7 +1555,7 @@ pub fn serve(listener: TcpListener, config: Config) -> io::Result<()> {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                if let Err(err) = accept(&server, stream) {
+                if let Err(err) = accept(&server, stream, false) {
                     eprintln!("Client connection dropped during setup: {err}");
                 }
             }
@@ -1473,11 +1569,44 @@ pub fn serve(listener: TcpListener, config: Config) -> io::Result<()> {
     Ok(())
 }
 
-fn accept(server: &Arc<Mutex<Server>>, mut stream: TcpStream) -> io::Result<()> {
+/// Reads a PROXY protocol v1 header, `PROXY TCP4|TCP6 <src> <dst> <sport> <dport>`
+/// (or `PROXY UNKNOWN ...`), one byte at a time so no client data is consumed.
+/// Returns the user's address, or None for UNKNOWN (a proxy health check).
+fn proxy_header(stream: &mut TcpStream) -> io::Result<Option<String>> {
+    let invalid = || io::Error::new(io::ErrorKind::InvalidData, "Bad PROXY header");
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut header = Vec::new();
+    let mut byte = [0u8];
+    while header.last() != Some(&b'\n') {
+        if header.len() >= 107 || stream.read(&mut byte)? == 0 {
+            return Err(invalid());
+        }
+        header.push(byte[0]);
+    }
+    let header = std::str::from_utf8(&header).map_err(|_| invalid())?;
+    let p: Vec<_> = header.trim_end().split(' ').collect();
+    match p.as_slice() {
+        ["PROXY", "UNKNOWN", ..] => Ok(None),
+        ["PROXY", "TCP4" | "TCP6", source, _, _, _] => {
+            let ip: std::net::IpAddr = source.parse().map_err(|_| invalid())?;
+            Ok(Some(ip.to_string()))
+        }
+        _ => Err(invalid()),
+    }
+}
+
+fn accept(server: &Arc<Mutex<Server>>, mut stream: TcpStream, proxied: bool) -> io::Result<()> {
+    let host = if proxied {
+        match proxy_header(&mut stream)? {
+            Some(host) => host,
+            None => return Ok(()),
+        }
+    } else {
+        stream.peer_addr()?.ip().to_string()
+    };
     stream.set_read_timeout(Some(Duration::from_secs(1)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     stream.set_nodelay(true)?;
-    let host = stream.peer_addr()?.ip().to_string();
     // Clone before registering the client so a failure leaves no half-made session.
     let socket = stream.try_clone()?;
     let mut writer = stream.try_clone()?;

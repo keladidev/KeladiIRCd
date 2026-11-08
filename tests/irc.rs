@@ -1,6 +1,6 @@
 use std::{
     io::{BufRead, BufReader, Read, Write},
-    net::{Shutdown, TcpStream},
+    net::{Shutdown, TcpListener, TcpStream},
     process::{Child, Command, Stdio},
     time::Duration,
 };
@@ -177,7 +177,7 @@ fn link_handshake(
     let mut reader = BufReader::new(socket.try_clone().unwrap());
     let ours = "0123456789abcdef0123456789abcdef";
     socket
-        .write_all(format!("YAMLINK 2 {name} {ours} {}\r\n", hex(known)).as_bytes())
+        .write_all(format!("YAMLINK 3 {name} {ours} {}\r\n", hex(known)).as_bytes())
         .unwrap();
     let mut challenge = String::new();
     reader.read_line(&mut challenge).unwrap();
@@ -431,7 +431,7 @@ fn linked_servers_burst_remote_chat_operator_permissions_and_split() {
     // A correct proof is answered with the server's own proof, then cycles are refused.
     let (_cyclic, mut reader, hello) =
         link_handshake(&link_a, "b.test", "link-secret", "b.test,a.test");
-    assert!(hello.starts_with("YAMLINK 2 a.test "), "{hello}");
+    assert!(hello.starts_with("YAMLINK 3 a.test "), "{hello}");
     assert!(
         !hello.contains("6c696e6b2d736563726574"),
         "The secret crossed the wire"
@@ -451,7 +451,7 @@ fn linked_servers_burst_remote_chat_operator_permissions_and_split() {
         }
     }
     forged
-        .write_all(b"USER a.test!1!1 41 61 3132372e302e302e31 - - - - -\r\n")
+        .write_all(b"USER a.test!1!1 41 61 3132372e302e302e31 - - - - - -\r\n")
         .unwrap();
     assert_eq!(
         reader.read(&mut data).unwrap(),
@@ -909,6 +909,46 @@ fn services_link_speaks_ngircd_protocol() {
         ]
     );
 
+    // ChanServ's +r marks a registered channel; only services may change it.
+    services.send(":services.test MODE #room +r");
+    assert_eq!(alice.line(), ":services.test MODE #room +r");
+    assert!(services.sync().is_empty(), "+r was echoed back to services");
+    alice.send("MODE #room -r");
+    assert!(alice.line().contains(" 482 Alice #room "));
+
+    // HostServ's vhost replaces the host others see; the user still sees the real one.
+    services.send(":services.test METADATA Alice cloakhost :alice.users.test");
+    assert!(alice
+        .line()
+        .contains(" 396 Alice alice.users.test :is now your displayed host"));
+    assert!(services.sync().is_empty(), "The vhost was echoed back");
+    alice.send("WHOIS Alice");
+    let whois = alice.until(" 318 ");
+    assert!(whois
+        .iter()
+        .any(|s| s.contains(" 311 Alice Alice ~guest alice.users.test ")));
+    assert!(whois
+        .iter()
+        .any(|s| s.contains(" 378 Alice Alice :is connecting from *@127.0.0.1 ")));
+
+    // Mode changes and kicks reach services from the user who made them.
+    let mut bob = Client::connect(&addr_a);
+    bob.register("Bob");
+    bob.join("#room");
+    alice.send("MODE #room +v Bob\r\nKICK #room Bob :bye");
+    alice.until(" KICK ");
+    let seen = services.sync();
+    for expected in [
+        ":Bob JOIN #room",
+        ":Alice MODE #room +v Bob",
+        ":Alice KICK #room Bob :bye",
+    ] {
+        assert!(
+            seen.iter().any(|l| l == expected),
+            "{expected} not in {seen:?}"
+        );
+    }
+
     // SVSNICK is reported back as the user's NICK; a services KILL is not echoed.
     services.send(":services.test SVSNICK Alice Guest1");
     assert!(alice.line().ends_with("NICK :Guest1"));
@@ -1059,4 +1099,141 @@ fn server_bans_kline_and_gline() {
     admin.line();
     std::thread::sleep(Duration::from_millis(2100));
     assert!(eventually_registers(&addr_a, "Brief"));
+}
+
+/// A stand-in for Anope's JSON-RPC interface: `alice`/`secret` is the only valid
+/// login, and requests without the right token (base64, as Anope expects) are refused.
+fn fake_anope_rpc() -> String {
+    let rpc = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = rpc.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        for stream in rpc.incoming() {
+            let mut stream = stream.unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let (mut length, mut authorized) = (0, false);
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let line = line.trim_end();
+                if line.is_empty() {
+                    break;
+                }
+                if let Some(value) = line.strip_prefix("Content-Length: ") {
+                    length = value.parse().unwrap();
+                }
+                authorized |= line == "Authorization: Bearer b3Blci1zZWNyZXQ=";
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            let body = String::from_utf8(body).unwrap();
+            let json = if !authorized {
+                r#"{"jsonrpc":"2.0","error":{"code":-32601,"message":"No authorization"},"id":1}"#
+            } else if body
+                .contains(r#""method":"anope.checkCredentials","params":["alice","secret"]"#)
+            {
+                r#"{"jsonrpc":"2.0","result":{"account":"Alice","confirmed":true,"uniqueid":1},"id":1}"#
+            } else {
+                r#"{"jsonrpc":"2.0","error":{"code":-32098,"message":"Invalid password"},"id":1}"#
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: Close\r\n\r\n{json}",
+                json.len()
+            );
+        }
+    });
+    address
+}
+
+#[test]
+fn sasl_plain_logs_in_through_anope_rpc() {
+    let rpc = fake_anope_rpc();
+    let (_a, address, _link) =
+        Daemon::network("a.test", &format!("sasl {rpc} /jsonrpc TEST_OPER_SECRET\n"));
+    let mut client = Client::connect(&address);
+    client.send("CAP LS 302");
+    assert!(client
+        .line()
+        .ends_with(" CAP * LS :multi-prefix userhost-in-names sasl"));
+    client.send("CAP REQ sasl\r\nNICK Alice\r\nUSER alice 0 * :Alice");
+    assert!(client.line().ends_with(" ACK :sasl"));
+
+    // A wrong password fails without ending the connection.
+    client.send("AUTHENTICATE PLAIN");
+    assert_eq!(client.line(), "AUTHENTICATE +");
+    client.send("AUTHENTICATE AGFsaWNlAHdyb25n");
+    assert!(client
+        .line()
+        .contains(" 904 Alice :SASL authentication failed"));
+
+    // The right one logs in, and registration waits for the answer.
+    client.send("AUTHENTICATE PLAIN");
+    assert_eq!(client.line(), "AUTHENTICATE +");
+    client.send("AUTHENTICATE AGFsaWNlAHNlY3JldA==\r\nCAP END");
+    assert!(client
+        .line()
+        .contains(" 900 Alice Alice!~alice@127.0.0.1 Alice :You are now logged in as Alice"));
+    assert!(client
+        .line()
+        .contains(" 903 Alice :SASL authentication successful"));
+    assert!(client.line().contains(" 001 Alice "));
+    client.send("WHOIS Alice");
+    assert!(client
+        .until(" 318 ")
+        .iter()
+        .any(|s| s.contains(" 330 Alice Alice Alice ")));
+    client.send("AUTHENTICATE PLAIN");
+    assert!(client.line().contains(" 907 Alice "));
+
+    // A login that fails while registration waits still lets the client in.
+    let mut bob = Client::connect(&address);
+    bob.send("CAP REQ sasl\r\nNICK Bob\r\nUSER bob 0 * :Bob\r\nAUTHENTICATE PLAIN");
+    bob.until("AUTHENTICATE +");
+    bob.send("AUTHENTICATE AGFsaWNlAHdyb25n\r\nCAP END");
+    assert!(bob.line().contains(" 904 Bob "));
+    assert!(bob.line().contains(" 001 Bob "));
+
+    // Without the sasl row the capability is not offered.
+    let (_b, plain, _) = Daemon::network("b.test", "");
+    let mut other = Client::connect(&plain);
+    other.send("CAP LS");
+    assert!(other
+        .line()
+        .ends_with(" LS :multi-prefix userhost-in-names"));
+}
+
+#[test]
+fn proxy_listener_takes_the_users_address_from_the_header() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_yamircd"))
+        .args(["--listen", "127.0.0.1:0", "--name", "irc.test"])
+        .args(["--proxy-listen", "127.0.0.1:0"])
+        .env_remove("YAMIRCD_PASSWORD")
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut log = BufReader::new(child.stderr.take().unwrap());
+    let _daemon = Daemon(child, None);
+    let mut line = String::new();
+    log.read_line(&mut line).unwrap();
+    line.clear();
+    log.read_line(&mut line).unwrap();
+    assert!(line.starts_with("YamIRCd PROXY listener on "), "{line}");
+    let proxy = line.split_whitespace().nth(4).unwrap().to_string();
+    std::thread::spawn(move || for _ in log.lines() {});
+
+    let mut user = Client::connect(&proxy);
+    user.send("PROXY TCP4 203.0.113.7 127.0.0.1 51000 6697");
+    user.register("Remote");
+    user.send("WHOIS Remote");
+    assert!(user
+        .until(" 318 ")
+        .iter()
+        .any(|s| s.contains(" 311 Remote Remote ~guest 203.0.113.7 ")));
+
+    // A connection without the header is closed before it reaches IRC.
+    let mut bare = Client::connect(&proxy);
+    bare.send("NICK Bare\r\nUSER guest 0 * :Guest");
+    let mut data = [0u8; 64];
+    // Closed or reset (Windows resets when unread data is discarded), never answered.
+    assert!(!matches!(bare.socket.read(&mut data), Ok(n) if n > 0));
 }

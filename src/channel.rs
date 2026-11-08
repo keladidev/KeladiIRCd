@@ -19,6 +19,8 @@ pub(crate) struct Channel {
     pub(crate) invite_only: bool,
     pub(crate) moderated: bool,
     pub(crate) secret: bool,
+    /// `+r`: registered with services, which alone may set it.
+    pub(crate) registered: bool,
     pub(crate) key: String,
     /// 0 means no limit.
     pub(crate) limit: usize,
@@ -42,6 +44,7 @@ impl Channel {
             invite_only: false,
             moderated: false,
             secret: false,
+            registered: false,
             key: String::new(),
             limit: 0,
             bans: Vec::new(),
@@ -65,12 +68,13 @@ impl Channel {
             && self.topic_by == other.topic_by
     }
 
-    /// Parameterless modes in CHANMODES order: `imnst`.
+    /// Parameterless modes in CHANMODES order: `imnrst`.
     pub(crate) fn flags(&self) -> String {
         [
             ('i', self.invite_only),
             ('m', self.moderated),
             ('n', self.no_external),
+            ('r', self.registered),
             ('s', self.secret),
             ('t', self.protected_topic),
         ]
@@ -84,6 +88,7 @@ impl Channel {
         self.invite_only = flags.contains('i');
         self.moderated = flags.contains('m');
         self.no_external = flags.contains('n');
+        self.registered = flags.contains('r');
         self.secret = flags.contains('s');
         self.protected_topic = flags.contains('t');
     }
@@ -147,10 +152,17 @@ impl Server {
     }
 
     fn banned(&self, ch: &Channel, id: u64) -> bool {
-        let identity = fold(&self.clients[&id].prefix());
-        ch.bans
-            .iter()
-            .any(|ban| oper::matches(&fold(ban), &identity))
+        // A vhost hides the real host from others, not from bans on it.
+        let c = &self.clients[&id];
+        let identities = [
+            fold(&c.prefix()),
+            fold(&format!("{}!~{}@{}", c.nick, c.user, shown_host(&c.host))),
+        ];
+        ch.bans.iter().any(|ban| {
+            identities
+                .iter()
+                .any(|identity| oper::matches(&fold(ban), identity))
+        })
     }
 
     /// Joins one channel; `forced` (SAJOIN) skips key, invite, ban and limit checks.
@@ -321,7 +333,7 @@ impl Server {
             if matches!(mode, '+' | '-') {
                 continue;
             }
-            // CHANMODES=b,k,l,imnst: b, k (and o, v) always take a parameter, l when set.
+            // CHANMODES=b,k,l,imnrst: b, k (and o, v) always take a parameter, l when set.
             let param = if matches!(mode, 'b' | 'k' | 'o' | 'v') || (mode == 'l' && adding) {
                 let value = p.get(arg).cloned();
                 arg += usize::from(value.is_some());
@@ -329,7 +341,7 @@ impl Server {
             } else {
                 None
             };
-            if !"biklmnostv".contains(mode) {
+            if !"biklmnorstv".contains(mode) {
                 self.numeric(id, 472, &format!("{mode} :is unknown mode char to me"));
                 continue;
             }
@@ -337,7 +349,7 @@ impl Server {
                 self.ban_list(id, &key);
                 continue;
             }
-            if !may_change {
+            if !may_change || (mode == 'r' && !self.is_service(id)) {
                 denied = true;
                 continue;
             }
@@ -358,11 +370,12 @@ impl Server {
             let ch = self.channels.get_mut(&key).unwrap();
             // Ok(Some(echo-param?)) when the mode changed, Ok(None) for a no-op.
             let outcome: Result<Option<Option<String>>, (u16, String)> = match mode {
-                'i' | 'm' | 'n' | 's' | 't' => {
+                'i' | 'm' | 'n' | 'r' | 's' | 't' => {
                     let flag = match mode {
                         'i' => &mut ch.invite_only,
                         'm' => &mut ch.moderated,
                         'n' => &mut ch.no_external,
+                        'r' => &mut ch.registered,
                         's' => &mut ch.secret,
                         _ => &mut ch.protected_topic,
                     };

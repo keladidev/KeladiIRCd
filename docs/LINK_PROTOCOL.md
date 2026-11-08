@@ -1,4 +1,4 @@
-# YamIRCd server protocol, version 2
+# YamIRCd server protocol, version 3
 
 This is a YamIRCd-specific protocol. It does **not** implement UnrealIRCd's
 `PROTOCTL`, `UID`, `SJOIN`, or other UnrealIRCd wire formats, and cannot link
@@ -24,10 +24,10 @@ the wire and a recorded handshake cannot be replayed. Nonces are 32 lowercase he
 digits, fresh for every connection.
 
 ```text
-connecting -> YAMLINK 2 <server-name> <nonce-c> <hex-comma-separated-known-server-names>
+connecting -> YAMLINK 3 <server-name> <nonce-c> <hex-comma-separated-known-server-names>
 accepting  -> CHALLENGE <nonce-a>
 connecting -> PROOF <HMAC-SHA256(secret, "YAMLINK connect <nonce-a> <nonce-c> <connecting-name>")>
-accepting  -> YAMLINK 2 <server-name> <nonce-a> <hex-known-server-names>
+accepting  -> YAMLINK 3 <server-name> <nonce-a> <hex-known-server-names>
               <HMAC-SHA256(secret, "YAMLINK accept <nonce-c> <nonce-a> <accepting-name>")>
 ```
 
@@ -38,9 +38,12 @@ accepting state. An attacker who answers at a configured outgoing address can
 collect one connecting proof to attack offline, so use long random secrets.
 
 Both peers must speak the same version: version 2 added channel modes, voice,
-invisible users, invitations, accounts and this handshake, so it does not link
-with version 1. Frames after the handshake are hex-framed, **not encrypted**. Use
-private loopback links or an authenticated encrypted tunnel for remote links.
+invisible users, invitations, accounts and this handshake; version 3 added
+vhosts to USER, the registered channel mode `r`, and the acting user to CHAN and
+MEMBER (so services see who kicked or changed modes). Versions do not link with
+each other. Frames after the handshake are hex-framed, **not encrypted**. Use
+private loopback links or an encrypted tunnel for remote links
+([TLS.md](TLS.md) shows stunnel).
 Linked servers are fully trusted network administrators, including authority to
 announce operators.
 
@@ -59,16 +62,16 @@ a user owned by the receiver or by another branch of the tree.
 | Frame | Fields after command | Purpose |
 | --- | --- | --- |
 | SERVER | name | Introduce a reachable server |
-| USER | uid hex-nick hex-user hex-host hex-realname hex-away oper-class hex-modes hex-account | Introduce/update a user; class is `-`, `local`, `global`, or `override`; modes are letters from `iR` (invisible, identified); the host is an IP or, for service bots, a hostname |
-| CHAN | hex-name revision revision-server hex-flags hex-key limit hex-topic hex-setter topic-time created hex-comma-separated-bans | Replicate channel metadata; flags are letters from `imnst`, limit 0 = none |
-| MEMBER | hex-channel uid status revision revision-server | Add/update membership; status bits 1 = operator, 2 = voice (0-3), `-` = removal |
+| USER | uid hex-nick hex-user hex-host hex-realname hex-away oper-class hex-modes hex-account hex-vhost | Introduce/update a user; class is `-`, `local`, `global`, or `override`; modes are letters from `iR` (invisible, identified); the host is an IP or, for service bots, a hostname; the vhost (empty for none) is the host others see |
+| CHAN | hex-name revision revision-server hex-flags hex-key limit hex-topic hex-setter topic-time created hex-comma-separated-bans actor | Replicate channel metadata; flags are letters from `imnrst`, limit 0 = none; actor is the uid whose command made the change, or `-` (bursts) |
+| MEMBER | hex-channel uid status revision revision-server actor hex-kick-reason | Add/update membership; status bits 1 = operator, 2 = voice (0-3), `-` = removal; actor as for CHAN; a removal by KICK carries the reason, otherwise `-` |
 | WIRE | recipient-uid hex-client-message | Route one already-authorized client delivery |
 | REMOVE | uid hex-reason | Remove a quit/killed user |
 | COLLIDE | losing-uid | Resolve duplicate nicknames |
 | GLINE | hex-mask expires hex-setter hex-reason | Add a network ban; expires is Unix time, 0 = never. Each server disconnects its matching local users |
 | UNGLINE | hex-mask | Remove a network ban |
 | SPLIT | hex-comma-separated-server-names hex-reason | Remove unreachable servers and their users |
-| FORCE | actor target-uid hex-command | Route an action to the target's home server. The actor is an override operator's uid, or a services server reached through the sending link. Commands: `JOIN`/`PART <channels>`, `NICK <nick>`, `ACCOUNT [<name>]`, `UMODE +R`/`-R` |
+| FORCE | actor target-uid hex-command | Route an action to the target's home server. The actor is an override operator's uid, or a services server reached through the sending link. Commands: `JOIN`/`PART <channels>`, `NICK <nick>`, `ACCOUNT [<name>]`, `UMODE +R`/`-R`, `VHOST [<host>]`, `VIDENT <user>` |
 | INVITED | target-uid hex-folded-channel | Record an invitation on the invitee's home server, which checks its JOINs |
 | END | none | Complete the initial state burst |
 | PING / PONG | none | Check link liveness |
