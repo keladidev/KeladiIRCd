@@ -66,7 +66,8 @@ $env:CARGO_HOME = Join-Path $PWD '.tools/cargo'
 
 ## Limits and scope
 
-256 users per server's network view, 8 direct links, 32 remote servers,
+256 connections per server (at most 10 of them unregistered from one IP address),
+8448 users network-wide, 8 direct links, 32 remote servers,
 20 channels per client, 30-byte ASCII nicknames, 50-byte channel
 names, 12-byte usernames, 300-byte topics. Each client has a bounded output queue;
 slow clients disconnect. A client sending more than 100 lines in a one-second

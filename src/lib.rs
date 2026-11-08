@@ -10,7 +10,13 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-const MAX_CLIENTS: usize = 256;
+/// Connections to this server, registered or not.
+const MAX_LOCAL: usize = 256;
+/// Unregistered connections from one IP, so idle sockets cannot fill the server.
+const MAX_PENDING_PER_IP: usize = 10;
+/// Users across the network: this server and up to 32 others. Kept separate from
+/// MAX_LOCAL so a full server never has to refuse (and drop a link over) a remote user.
+const MAX_NETWORK_USERS: usize = MAX_LOCAL * 33;
 const MAX_CHANNELS: usize = 20;
 const MAX_LINE: usize = 510;
 const QUEUE_SIZE: usize = 512;
@@ -1402,9 +1408,21 @@ fn accept(server: &Arc<Mutex<Server>>, mut stream: TcpStream) -> io::Result<()> 
     let id;
     {
         let mut state = server.lock().unwrap();
-        if state.clients.len() >= MAX_CLIENTS {
+        let local = state.clients.values().filter(|c| c.route.is_none());
+        let pending = local
+            .clone()
+            .filter(|c| !c.registered && c.host == host)
+            .count();
+        let refusal = if local.count() >= MAX_LOCAL {
+            Some("ERROR :Server is full\r\n")
+        } else if pending >= MAX_PENDING_PER_IP {
+            Some("ERROR :Too many unregistered connections from your address\r\n")
+        } else {
+            None
+        };
+        if let Some(refusal) = refusal {
             drop(state);
-            let _ = stream.write_all(b"ERROR :Server is full\r\n");
+            let _ = stream.write_all(refusal.as_bytes());
             return Ok(());
         }
         state.next_id += 1;

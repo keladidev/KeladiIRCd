@@ -442,19 +442,27 @@ fn linked_servers_burst_remote_chat_operator_permissions_and_split() {
     alice.send("MODE #network +vk Bob sesame");
     alice.line();
     assert!(bob.line().ends_with("MODE #network +vk Bob sesame"));
+    bob.send("CAP REQ multi-prefix");
+    bob.line();
+    // The key and the voice travel as separate updates; wait until both arrived.
     let mut replicated = false;
     for _ in 0..50 {
-        bob.send("MODE #network");
-        if bob.until(" 329 ")[0].ends_with(" 324 Bob #network +ntk sesame") {
+        bob.send("MODE #network\r\nNAMES #network");
+        let replies = bob.until(" 366 ");
+        if replies[0].ends_with(" 324 Bob #network +ntk sesame")
+            && replies
+                .iter()
+                .any(|s| s.contains(" 353 ") && s.contains("@+Bob"))
+        {
             replicated = true;
             break;
         }
         std::thread::sleep(Duration::from_millis(40));
     }
-    assert!(replicated, "Channel key did not reach the other server");
-    bob.send("CAP REQ multi-prefix\r\nNAMES #network");
-    bob.line();
-    assert!(bob.until(" 366 ")[0].contains("@+Bob"));
+    assert!(
+        replicated,
+        "Channel key and voice did not reach the other server"
+    );
     alice.send("MODE #network -k *");
     alice.line();
     bob.line();
@@ -841,4 +849,23 @@ fn services_link_speaks_ngircd_protocol() {
     let mut watcher = Client::connect(&addr_a);
     watcher.register("Watcher");
     watcher.wait_nick("NickServ", false);
+}
+
+#[test]
+fn unregistered_connections_per_address_are_limited() {
+    let (_daemon, address) = Daemon::start(None);
+    let mut pending: Vec<_> = (0..10).map(|_| Client::connect(&address)).collect();
+    for client in &mut pending {
+        client.send("PING :waiting");
+        assert!(client.line().ends_with(":waiting"));
+    }
+    let mut refused = Client::connect(&address);
+    assert_eq!(
+        refused.line(),
+        "ERROR :Too many unregistered connections from your address"
+    );
+    // Registering frees the address's slot; registered users do not count.
+    pending[0].register("First");
+    let mut accepted = Client::connect(&address);
+    accepted.register("Second");
 }

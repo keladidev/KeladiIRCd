@@ -480,7 +480,7 @@ impl Server {
                     c.oper = oper;
                     (c.invisible, c.identified, c.account) = (invisible, identified, account);
                 } else {
-                    if self.clients.len() >= MAX_CLIENTS {
+                    if self.clients.len() >= MAX_NETWORK_USERS {
                         return None;
                     }
                     self.next_id += 1;
@@ -523,7 +523,7 @@ impl Server {
                     return None;
                 }
                 let key = fold(&name);
-                if self.channels.len() >= MAX_CLIENTS * MAX_CHANNELS
+                if self.channels.len() >= MAX_NETWORK_USERS * MAX_CHANNELS
                     && !self.channels.contains_key(&key)
                 {
                     return None;
@@ -567,7 +567,7 @@ impl Server {
                     self.net_flood(Some(link), line);
                     return Some(());
                 }
-                if self.member_versions.len() >= MAX_CLIENTS * MAX_CHANNELS * 2
+                if self.member_versions.len() >= MAX_NETWORK_USERS * MAX_CHANNELS * 2
                     && !self.member_versions.contains_key(&version_key)
                 {
                     self.member_versions.retain(|(channel, uid), _| {
@@ -596,7 +596,7 @@ impl Server {
                     {
                         return None;
                     }
-                    if self.channels.len() >= MAX_CLIENTS * MAX_CHANNELS
+                    if self.channels.len() >= MAX_NETWORK_USERS * MAX_CHANNELS
                         && !self.channels.contains_key(&key)
                     {
                         return None;
