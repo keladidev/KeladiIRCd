@@ -65,14 +65,16 @@ a user owned by the receiver or by another branch of the tree.
 | WIRE | recipient-uid hex-client-message | Route one already-authorized client delivery |
 | REMOVE | uid hex-reason | Remove a quit/killed user |
 | COLLIDE | losing-uid | Resolve duplicate nicknames |
+| GLINE | hex-mask expires hex-setter hex-reason | Add a network ban; expires is Unix time, 0 = never. Each server disconnects its matching local users |
+| UNGLINE | hex-mask | Remove a network ban |
 | SPLIT | hex-comma-separated-server-names hex-reason | Remove unreachable servers and their users |
 | FORCE | actor target-uid hex-command | Route an action to the target's home server. The actor is an override operator's uid, or a services server reached through the sending link. Commands: `JOIN`/`PART <channels>`, `NICK <nick>`, `ACCOUNT [<name>]`, `UMODE +R`/`-R` |
 | INVITED | target-uid hex-folded-channel | Record an invitation on the invitee's home server, which checks its JOINs |
 | END | none | Complete the initial state burst |
 | PING / PONG | none | Check link liveness |
 
-Initial bursts send servers, users, channel metadata, and memberships, followed
-by END. Existing local clients see remote JOINs during a burst. Live state frames
+Initial bursts send servers, users, channel metadata, memberships, and network
+bans, followed by END. Existing local clients see remote JOINs during a burst. Live state frames
 flood the tree except their incoming link. WIRE, FORCE and INVITED follow only the target's
 route, avoiding broadcast loops. Client identity prefixes come from session state.
 Only `#` channels are shared; `&` channels stay local.

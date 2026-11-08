@@ -918,6 +918,19 @@ fn services_link_speaks_ngircd_protocol() {
         "The KILL was echoed back to services"
     );
 
+    // AKILL arrives as GLINE: matching users are removed, and it can be lifted.
+    let mut spammer = Client::connect(&addr_a);
+    spammer.register("Spammer");
+    services.send(":services.test GLINE spammer!*@* 0 :Spam (by OperServ)");
+    assert_eq!(
+        spammer.until("ERROR ").last().unwrap(),
+        "ERROR :Closing Link: Banned (Spam (by OperServ))"
+    );
+    services.send(":services.test GLINE spammer!*@*");
+    services.sync();
+    let mut spammer = Client::connect(&addr_a);
+    spammer.register("Spammer");
+
     // Services' users leave the network with the link.
     services.out.shutdown(Shutdown::Both).unwrap();
     let mut watcher = Client::connect(&addr_a);
@@ -942,4 +955,95 @@ fn unregistered_connections_per_address_are_limited() {
     pending[0].register("First");
     let mut accepted = Client::connect(&address);
     accepted.register("Second");
+}
+
+/// Tries to register `nick` until it succeeds; false if every attempt was banned.
+fn eventually_registers(address: &str, nick: &str) -> bool {
+    (0..50).any(|_| {
+        let mut client = Client::connect(address);
+        client.send(&format!("NICK {nick}\r\nUSER guest 0 * :Guest"));
+        let outcome = loop {
+            let line = client.line();
+            if line.contains(" 001 ") || line.contains(" 465 ") {
+                break line;
+            }
+        };
+        let registered = outcome.contains(" 001 ");
+        if !registered {
+            std::thread::sleep(Duration::from_millis(40));
+        }
+        registered
+    })
+}
+
+#[test]
+fn server_bans_kline_and_gline() {
+    let (_a, addr_a, link_a) = Daemon::network("a.test", "link b.test - 127.0.0.1 TEST_LINK_SECRET\noper admin 127.0.0.1 global TEST_OPER_SECRET\noper helper 127.0.0.1 local TEST_OPER_SECRET\n");
+    let (_b, addr_b, _link_b) = Daemon::network(
+        "b.test",
+        &format!("link a.test {link_a} 127.0.0.1 TEST_LINK_SECRET\n"),
+    );
+    let mut admin = Client::connect(&addr_a);
+    admin.register("Admin");
+    admin.oper("admin");
+    let mut victim = Client::connect(&addr_b);
+    victim.register("Victim");
+    admin.wait_nick("Victim", true);
+
+    // Local operators may not ban, and masks matching everyone are refused.
+    let mut helper = Client::connect(&addr_a);
+    helper.register("Helper");
+    helper.oper("helper");
+    helper.send("GLINE victim!*@* 0 :nope");
+    assert!(helper.line().contains(" 481 "));
+    admin.send("GLINE *@* 0 :everyone");
+    assert!(admin.line().contains("Invalid or too broad G-Line mask"));
+
+    // A G-Line removes matching users on every server and refuses them afterwards.
+    admin.send("GLINE victim!*@* 0 :Go away");
+    assert!(admin.line().contains("G-Line added for victim!*@*"));
+    assert_eq!(
+        victim.until("ERROR ").last().unwrap(),
+        "ERROR :Closing Link: Banned (Go away)"
+    );
+    let mut again = Client::connect(&addr_b);
+    again.send("NICK Victim\r\nUSER guest 0 * :Guest");
+    assert!(again
+        .until("ERROR ")
+        .iter()
+        .any(|s| s.contains(" 465 Victim :You are banned from this server: Go away")));
+    admin.send("STATS g");
+    assert!(admin
+        .until(" 219 ")
+        .iter()
+        .any(|s| s.contains(" 223 Admin G victim!*@* 0 Admin!~guest@127.0.0.1 :Go away")));
+    admin.send("GLINE victim!*@*");
+    assert!(admin.line().contains("G-Line removed for victim!*@*"));
+    assert!(
+        eventually_registers(&addr_b, "Victim"),
+        "UNGLINE did not reach B"
+    );
+
+    // A K-Line applies only to the server that set it.
+    let mut local = Client::connect(&addr_a);
+    local.register("Local");
+    admin.send("KLINE local*!*@* 0 :Not here");
+    assert!(admin.line().contains("K-Line added for local*!*@*"));
+    assert_eq!(
+        local.until("ERROR ").last().unwrap(),
+        "ERROR :Closing Link: Banned (Not here)"
+    );
+    let mut elsewhere = Client::connect(&addr_b);
+    elsewhere.register("Localb");
+    admin.send("STATS k");
+    assert!(admin
+        .until(" 219 ")
+        .iter()
+        .any(|s| s.contains(" 216 Admin K local*!*@* 0 ")));
+
+    // Timed bans expire.
+    admin.send("GLINE brief!*@* 1 :One second");
+    admin.line();
+    std::thread::sleep(Duration::from_millis(2100));
+    assert!(eventually_registers(&addr_a, "Brief"));
 }

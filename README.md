@@ -81,7 +81,7 @@ and is discarded. Oversized lines receive `417` and are discarded.
 State is in memory and disappears on restart. This is not a complete UnrealIRCd
 implementation. Built-in services, SASL, native TLS, other user modes, ban
 exceptions (`+e`), invite exceptions (`+I`), extended bans, WHOX, MONITOR,
-server bans (KLINE/GLINE), and other administrative commands are not implemented.
+and other administrative commands are not implemented.
 Unknown commands or modes receive the corresponding numeric errors. Message tags
 are not negotiated or relayed. The thread-per-client design targets small networks.
 
@@ -174,10 +174,11 @@ network; users on every server see the service bots and can use them.
 
 Tested with Anope 2.1.27: nickname registration, IDENTIFY and LOGOUT, `+R` and the
 account shown in WHOIS (`330`, `307`, `900`/`901`), ChanServ channel registration
-and modes, NickServ RECOVER (KILL and SVSNICK), and service bots in channels.
+and modes, NickServ RECOVER (KILL and SVSNICK), service bots in channels, and
+OperServ AKILL (sent as GLINE; OperServ requires IRC operator status).
 Service bots act with operator-override privileges. Not supported: SASL and
 SVSJOIN (Anope's ngIRCd module lacks them, so `ns_sasl*` and `ns_ajoin` do not
-load), virtual hosts (HostServ), AKILL/GLINE, and the registered channel mode `+r`.
+load), virtual hosts (HostServ), and the registered channel mode `+r`.
 Services learn about kicks of ordinary users as PART, and about mode changes as
 coming from the user's server.
 
@@ -189,7 +190,7 @@ Following [UnrealIRCd's operator model](https://www.unrealircd.org/docs/Oper_blo
 | Class | Privileges |
 | --- | --- |
 | `local` | KILL local users, send WALLOPS to network operators |
-| `global` | Also KILL remote users, SQUIT direct links, enable configured links with CONNECT |
+| `global` | Also KILL remote users, SQUIT direct links, enable configured links with CONNECT, set KLINE and GLINE |
 | `override` | Also bypass channel MODE/TOPIC/KICK permission checks and use SAJOIN, SAPART, SAMODE |
 
 Example client commands on server A:
@@ -204,10 +205,19 @@ Example client commands on server A:
 /SAMODE #general +o nickname
 /LINKS
 /SQUIT b.local Maintenance
+/GLINE *@192.0.2.* 3600 :Abuse from this range
+/KLINE baduser@* 0 :Not on this server
+/STATS g
+/GLINE *@192.0.2.*
 /MODE your-nickname -o
 ```
 
 Successful OPER sends numeric `381` and MODE `+o`; WHOIS shows numeric `313`.
+`KLINE` bans users from one server and `GLINE` from the whole network:
+`<mask> <seconds> :<reason>` adds a ban (0 seconds is permanent) and `<mask>`
+alone removes it. Masks are `user@host`, `nick!user@host` or a host; matching
+ignores the `~` before usernames, and masks matching everyone are refused.
+Matching users are disconnected with `465`, and `STATS k` / `STATS g` list bans.
 Users cannot give themselves `+o` with MODE. A global operator can `/CONNECT
 server-name` to re-enable a link disabled by SQUIT: an outgoing link is dialled
 again, and an incoming-only link is accepted again when the peer reconnects. In

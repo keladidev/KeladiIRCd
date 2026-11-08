@@ -776,7 +776,23 @@ impl Server {
                     self.set_topic(actor, &key, topic);
                 }
             }
-            // GLINE (AKILL), jupes, STATS and the like are not supported.
+            ("GLINE", true) if !p.is_empty() => {
+                // AKILL: GLINE <mask> <seconds> :<reason> adds, GLINE <mask> removes.
+                let Some(mask) = bans::ban_mask(&p[0]) else {
+                    return;
+                };
+                if p.len() >= 3 {
+                    let seconds = p[1].parse().unwrap_or(0);
+                    let setter = self.links[&link].name.clone();
+                    if self.add_server_ban(mask, seconds, &p[2], &setter, true) {
+                        let ban = self.server_bans.last().unwrap();
+                        self.net_flood(None, &self.gline_record(ban));
+                    }
+                } else if self.remove_server_ban(&mask, true) {
+                    self.net_flood(None, &format!("UNGLINE {}", encode(&mask)));
+                }
+            }
+            // Jupes, STATS and the like are not supported.
             _ => {}
         }
     }

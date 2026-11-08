@@ -321,6 +321,9 @@ impl Server {
                 );
             }
         }
+        for record in self.gline_records() {
+            self.link_send(link, &record);
+        }
         self.link_send(link, "END");
     }
 
@@ -725,6 +728,14 @@ impl Server {
                     return None;
                 }
                 self.record_invite(target, &key);
+            }
+            "GLINE" if p.len() == 5 => {
+                self.gline_frame(&p)?;
+                self.net_flood(Some(link), line);
+            }
+            "UNGLINE" if p.len() == 2 => {
+                self.gline_frame(&p)?;
+                self.net_flood(Some(link), line);
             }
             "END" if p.len() == 1 => {
                 self.channels.retain(|_, ch| !ch.members.is_empty());

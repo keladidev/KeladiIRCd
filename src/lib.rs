@@ -25,6 +25,7 @@ const QUEUE_SIZE: usize = 512;
 const MAX_WHOWAS: usize = 1024;
 /// IRCv3 capabilities offered in CAP LS.
 const CAPABILITIES: &str = "multi-prefix userhost-in-names";
+mod bans;
 mod channel;
 mod crypto;
 mod network;
@@ -312,6 +313,8 @@ struct Server {
     max_global: usize,
     /// Most recent first, capped at MAX_WHOWAS.
     whowas: VecDeque<Whowas>,
+    /// KLINEs and GLINEs, including expired ones until the next tick.
+    server_bans: Vec<bans::ServerBan>,
 }
 
 impl Server {
@@ -331,6 +334,7 @@ impl Server {
             max_local: 0,
             max_global: 0,
             whowas: VecDeque::new(),
+            server_bans: Vec::new(),
         }
     }
 
@@ -445,6 +449,9 @@ impl Server {
                 self.numeric(id, 464, ":Password incorrect");
                 self.auth_failed(id);
             }
+            return;
+        }
+        if self.reject_banned(id) {
             return;
         }
         self.clients.get_mut(&id).unwrap().registered = true;
@@ -731,6 +738,7 @@ impl Server {
             "NICK" | "PASS" | "PING" | "CAP" | "JOIN" | "PART" | "TOPIC" | "MODE" | "WHOIS" => 1,
             "KICK" | "INVITE" | "OPER" | "SAJOIN" | "SAPART" | "SAMODE" => 2,
             "WALLOPS" | "SQUIT" | "CONNECT" | "USERHOST" | "ISON" | "KILL" | "WHOWAS" => 1,
+            "KLINE" | "GLINE" => 1,
             "USER" => 4,
             _ => 0,
         };
@@ -744,9 +752,8 @@ impl Server {
         }
         match command {
             "OPER" => self.oper_login(id, &p),
-            "KILL" | "WALLOPS" | "SQUIT" | "CONNECT" | "SAJOIN" | "SAPART" | "SAMODE" => {
-                self.oper_command(id, command, &p)
-            }
+            "KILL" | "WALLOPS" | "SQUIT" | "CONNECT" | "SAJOIN" | "SAPART" | "SAMODE" | "KLINE"
+            | "GLINE" => self.oper_command(id, command, &p),
             "LINKS" => {
                 self.numeric(
                     id,
@@ -1137,6 +1144,7 @@ impl Server {
                 self.numeric(id, code, &format!(":{}", found.join(" ")));
             }
             "MOTD" => self.motd(id),
+            "STATS" => self.stats(id, &p),
             "LUSERS" => self.lusers(id),
             "VERSION" => self.numeric(
                 id,
@@ -1326,6 +1334,7 @@ impl Server {
     }
 
     fn tick(&mut self) {
+        self.prune_server_bans();
         let now = Instant::now();
         self.deleted_users
             .retain(|_, at| now.duration_since(*at) < Duration::from_secs(120));

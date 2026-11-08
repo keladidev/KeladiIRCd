@@ -222,6 +222,13 @@ impl Server {
                 let reason = p.get(1).map_or("No reason given", String::as_str);
                 self.kill_user(id, target, reason);
             }
+            "KLINE" | "GLINE" => {
+                if class == OperClass::Local {
+                    self.numeric(id, 481, ":Global operator privileges required");
+                    return;
+                }
+                self.ban_command(id, command, p);
+            }
             "WALLOPS" => {
                 let recipients: Vec<_> = self
                     .clients
