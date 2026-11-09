@@ -909,9 +909,12 @@ fn services_link_speaks_ngircd_protocol() {
     assert!(whois
         .iter()
         .any(|s| s.contains(" 312 Alice NickServ services.test ")));
-    alice.send("PRIVMSG NickServ :help");
+    // Alice's PONG proves the server handled her lines before services' PING checks for them.
+    alice.send("PRIVMSG NickServ :help\r\nPING sync");
+    alice.until("PONG");
     assert_eq!(services.sync(), [":Alice PRIVMSG NickServ :help"]);
-    alice.send("NS identify alice hunter2\r\nnickserv help");
+    alice.send("NS identify alice hunter2\r\nnickserv help\r\nPING sync");
+    alice.until("PONG");
     assert_eq!(
         services.sync(),
         [
