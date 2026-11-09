@@ -1,5 +1,5 @@
 //! SHA-256 (FIPS 180-4) and HMAC-SHA256 (RFC 2104) for link authentication,
-//! kept in-tree because YamIRCd has no dependencies.
+//! kept in-tree because KeladiIRCd has no dependencies.
 use std::{
     collections::hash_map::RandomState,
     hash::{BuildHasher, Hasher},
@@ -117,7 +117,7 @@ pub(crate) fn nonce_valid(nonce: &str) -> bool {
 /// the role (`connect` or `accept`) and the proving server's name.
 #[doc(hidden)]
 pub fn link_proof(secret: &str, role: &str, nonce_a: &str, nonce_b: &str, name: &str) -> String {
-    let message = format!("YAMLINK {role} {nonce_a} {nonce_b} {name}");
+    let message = format!("KELADILINK {role} {nonce_a} {nonce_b} {name}");
     hex(&hmac_sha256(secret.as_bytes(), message.as_bytes()))
 }
 

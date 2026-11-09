@@ -1,11 +1,11 @@
-"""Load test for a running YamIRCd: delivery latency and server CPU under load.
+"""Load test for a running KeladiIRCd: delivery latency and server CPU under load.
 
 Usage: python -I load.py HOST PORT [--clients 250] [--pid PID]
 
 Scenario 1 puts every client in one channel and sends messages at increasing
 rates; each message fans out to every other member. Scenario 2 puts every
 client in 20 of 250 channels (5000 memberships), which is the costly case for
-YamIRCd's per-command state comparison, and measures PING round trips and
+KeladiIRCd's per-command state comparison, and measures PING round trips and
 messages in those channels. With --pid, the server's CPU time is reported
 (needs PowerShell on Windows or /proc on Linux).
 """

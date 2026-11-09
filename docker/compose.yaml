@@ -1,32 +1,33 @@
-# Three linked YamIRCd servers and Anope. See docker/README.md.
+# Three linked KeladiIRCd servers and Anope. See docker/README.md.
 #
 #   beta ──┐
 #          ├── alpha ── anope (services.irc.test)
 #   cypher ┘
-name: yamircd
+name: keladiircd
 
-x-yamircd: &yamircd
+x-keladiircd: &keladiircd
   build:
     context: ..
-    dockerfile: docker/yamircd.Dockerfile
-  image: yamircd:local
+    dockerfile: docker/keladiircd.Dockerfile
+  image: keladiircd:local
   init: true # so Ctrl+C and `docker compose down` stop it at once
   restart: unless-stopped
 
 services:
   alpha:
-    <<: *yamircd
+    <<: *keladiircd
     command: >-
       --name alpha.irc.test --description "alpha hub"
       --listen 0.0.0.0:6667 --link-listen 0.0.0.0:7000
-      --config /etc/yamircd.conf
+      --config /etc/keladiircd.conf
     environment:
       BETA_LINK_SECRET: ${BETA_LINK_SECRET:?copy .env.example to .env}
       CYPHER_LINK_SECRET: ${CYPHER_LINK_SECRET:?copy .env.example to .env}
       SERVICES_SECRET: ${SERVICES_SECRET:?copy .env.example to .env}
       RPC_TOKEN: ${RPC_TOKEN:?copy .env.example to .env}
+      ALPHA_OPER_SECRET: ${ALPHA_OPER_SECRET:?copy .env.example to .env}
     volumes:
-      - ./alpha.conf:/etc/yamircd.conf:ro
+      - ./alpha.conf:/etc/keladiircd.conf:ro
     ports:
       - 127.0.0.1:6667:6667
     networks:
@@ -34,16 +35,16 @@ services:
         ipv4_address: 172.30.0.10
 
   beta:
-    <<: *yamircd
+    <<: *keladiircd
     command: >-
       --name beta.irc.test --description "beta leaf"
       --listen 0.0.0.0:6667 --link-listen 0.0.0.0:7000
-      --config /etc/yamircd.conf
+      --config /etc/keladiircd.conf
     environment:
       BETA_LINK_SECRET: ${BETA_LINK_SECRET:?copy .env.example to .env}
       RPC_TOKEN: ${RPC_TOKEN:?copy .env.example to .env}
     volumes:
-      - ./beta.conf:/etc/yamircd.conf:ro
+      - ./beta.conf:/etc/keladiircd.conf:ro
     ports:
       - 127.0.0.1:6668:6667
     networks:
@@ -52,16 +53,16 @@ services:
     depends_on: [alpha]
 
   cypher:
-    <<: *yamircd
+    <<: *keladiircd
     command: >-
       --name cypher.irc.test --description "cypher leaf"
       --listen 0.0.0.0:6667 --link-listen 0.0.0.0:7000
-      --config /etc/yamircd.conf
+      --config /etc/keladiircd.conf
     environment:
       CYPHER_LINK_SECRET: ${CYPHER_LINK_SECRET:?copy .env.example to .env}
       RPC_TOKEN: ${RPC_TOKEN:?copy .env.example to .env}
     volumes:
-      - ./cypher.conf:/etc/yamircd.conf:ro
+      - ./cypher.conf:/etc/keladiircd.conf:ro
     ports:
       - 127.0.0.1:6669:6667
     networks:
@@ -76,7 +77,7 @@ services:
       args:
         UPLINK: 172.30.0.10
         SERVICES_NAME: services.irc.test
-    image: yamircd-anope:local
+    image: keladiircd-anope:local
     restart: unless-stopped
     environment:
       SERVICES_SECRET: ${SERVICES_SECRET:?copy .env.example to .env}

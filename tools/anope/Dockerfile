@@ -1,4 +1,4 @@
-# Anope IRC Services built from the official source release, for testing YamIRCd.
+# Anope IRC Services built from the official source release, for testing KeladiIRCd.
 FROM debian:bookworm-slim AS build
 RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential cmake git ca-certificates \

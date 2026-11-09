@@ -1,7 +1,7 @@
 //! Services link: the ngIRCd server protocol (RFC 2813 with ngIRCd's extensions),
 //! so services such as Anope can link with their `ngircd` protocol module.
 //!
-//! Outgoing YamIRCd frames are translated by `View`, which remembers what services
+//! Outgoing KeladiIRCd frames are translated by `View`, which remembers what services
 //! have been told so state changes go out as differences. Incoming commands run as
 //! privileged actions of a service bot, or of the services server's hidden stand-in.
 use super::*;
@@ -93,7 +93,7 @@ pub(crate) struct View {
     pub(crate) actor: u64,
     /// While services' own commands run, their effects update the view silently.
     pub(crate) quiet: bool,
-    /// Other YamIRCd servers and the tokens they were introduced with.
+    /// Other KeladiIRCd servers and the tokens they were introduced with.
     servers: BTreeMap<String, u32>,
     next_token: u32,
     users: BTreeMap<String, Seen>,
@@ -142,7 +142,7 @@ impl View {
     }
 
     /// Records the expected result of a change services made to a user on another
-    /// YamIRCd server, so the update coming back from there is not echoed to them.
+    /// KeladiIRCd server, so the update coming back from there is not echoed to them.
     fn assume(&mut self, uid: &str, msg: &Message) {
         let Some(seen) = self.users.get_mut(uid) else {
             return;
@@ -231,7 +231,7 @@ impl View {
                     let token = self.next_token;
                     self.next_token += 1;
                     self.servers.insert(name.into(), token);
-                    out.push(format!(":{me} SERVER {name} 2 {token} :YamIRC server"));
+                    out.push(format!(":{me} SERVER {name} 2 {token} :KeladiIRC server"));
                 }
             }
             ("USER", 11) => {
@@ -537,7 +537,7 @@ pub(super) fn session(
         let me = state.config.name.clone();
         let link = &state.links[&id];
         link.raw(&format!(
-            "PASS {} 0210-IRC+ YamIRCd|0.1.0:CM P",
+            "PASS {} 0210-IRC+ KeladiIRCd|0.1.0:CM P",
             config.password
         ));
         link.raw(&format!("SERVER {me} 1 :{}", state.config.description));
@@ -877,7 +877,7 @@ impl Server {
     }
 
     /// Applies a services action to a user, forwarding it to the user's home server
-    /// when the user is on another YamIRCd server.
+    /// when the user is on another KeladiIRCd server.
     fn services_force(&mut self, link: u64, target: u64, command: &str) {
         let services = self.links[&link].name.clone();
         let Some(msg) = parse(command) else {

@@ -1,4 +1,4 @@
-"""irctest controller that starts one YamIRCd process per test case."""
+"""irctest controller that starts one KeladiIRCd process per test case."""
 
 import os
 import subprocess
@@ -7,11 +7,11 @@ from typing import Optional, Set, Tuple, Type
 from irctest.basecontrollers import BaseServerController, DirectoryBasedController
 from irctest.runner import NotImplementedByController
 
-BINARY = os.environ["YAMIRCD_BIN"]
+BINARY = os.environ["KELADIIRCD_BIN"]
 
 
-class YamircdController(BaseServerController, DirectoryBasedController):
-    software_name = "YamIRCd"
+class KeladiircdController(BaseServerController, DirectoryBasedController):
+    software_name = "KeladiIRCd"
     supported_sasl_mechanisms: Set[str] = set()
     supports_sts = False
 
@@ -38,13 +38,13 @@ class YamircdController(BaseServerController, DirectoryBasedController):
         self.hostname = hostname
         self.create_config()
         assert self.directory
-        with self.open_file("yamircd.conf") as fd:
+        with self.open_file("keladiircd.conf") as fd:
             # irctest's standard operator credentials.
             fd.write("oper operuser * override IRCTEST_OPER_PASSWORD\n")
         env = dict(os.environ, IRCTEST_OPER_PASSWORD="operpassword")
-        env.pop("YAMIRCD_PASSWORD", None)
+        env.pop("KELADIIRCD_PASSWORD", None)
         if password:
-            env["YAMIRCD_PASSWORD"] = password
+            env["KELADIIRCD_PASSWORD"] = password
         self.proc = self.execute(
             [
                 BINARY,
@@ -56,7 +56,7 @@ class YamircdController(BaseServerController, DirectoryBasedController):
                 "--description",
                 "test server",
                 "--config",
-                self.directory / "yamircd.conf",
+                self.directory / "keladiircd.conf",
             ],
             env=env,
         )
@@ -78,5 +78,5 @@ class YamircdController(BaseServerController, DirectoryBasedController):
         self.proc = None
 
 
-def get_irctest_controller_class() -> Type[YamircdController]:
-    return YamircdController
+def get_irctest_controller_class() -> Type[KeladiircdController]:
+    return KeladiircdController

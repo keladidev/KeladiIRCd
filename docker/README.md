@@ -6,7 +6,7 @@ beta   (127.0.0.1:6668) ──┐
 cypher (127.0.0.1:6669) ──┘
 ```
 
-Three YamIRCd servers and Anope 2.1.27 on one private Docker network. beta and
+Three KeladiIRCd servers and Anope 2.1.27 on one private Docker network. beta and
 cypher link to alpha, and Anope links to alpha. All three servers offer SASL,
 which they check against Anope's JSON-RPC interface on the private network.
 
@@ -65,11 +65,11 @@ delete them as well, run `docker compose down -v`.
 | `compose.yaml` | Containers, fixed addresses (`172.30.0.0/24`), published ports |
 | `alpha.conf` | Accepts beta, cypher and Anope; SASL row |
 | `beta.conf`, `cypher.conf` | Connect to alpha; SASL row |
-| `yamircd.Dockerfile` | YamIRCd release build |
+| `keladiircd.Dockerfile` | KeladiIRCd release build |
 | `../tools/anope/Dockerfile` | The `network` target builds Anope's configuration (uplink `172.30.0.10`) |
 | `.env` | Link secrets and the JSON-RPC token (git ignores it) |
 
-Each container has a fixed address because YamIRCd link rows take IP addresses,
+Each container has a fixed address because KeladiIRCd link rows take IP addresses,
 not host names. If `172.30.0.0/24` clashes with a network you already use,
 change the subnet and every `172.30.0.x` address in `compose.yaml`, the three
 `.conf` files and the `UPLINK` build argument together.

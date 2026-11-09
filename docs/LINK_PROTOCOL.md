@@ -1,6 +1,6 @@
-# YamIRCd server protocol, version 3
+# KeladiIRCd server protocol, version 3
 
-This is a YamIRCd-specific protocol. It does **not** implement UnrealIRCd's
+This is a KeladiIRCd-specific protocol. It does **not** implement UnrealIRCd's
 `PROTOCTL`, `UID`, `SJOIN`, or other UnrealIRCd wire formats, and cannot link
 directly to UnrealIRCd or Anope. The design follows the distinction between
 [authenticated links](https://www.unrealircd.org/docs/Link_block) and
@@ -9,7 +9,7 @@ directly to UnrealIRCd or Anope. The design follows the distinction between
 ## Transport and authentication
 
 Services servers such as Anope use the same listener but speak the ngIRCd
-protocol instead; a connection whose first line is not `YAMLINK` is treated as
+protocol instead; a connection whose first line is not `KELADILINK` is treated as
 one. See the README's services section.
 
 Links use a dedicated TCP listener. Configure each peer's exact server name,
@@ -24,11 +24,11 @@ the wire and a recorded handshake cannot be replayed. Nonces are 32 lowercase he
 digits, fresh for every connection.
 
 ```text
-connecting -> YAMLINK 3 <server-name> <nonce-c> <hex-comma-separated-known-server-names>
+connecting -> KELADILINK 3 <server-name> <nonce-c> <hex-comma-separated-known-server-names>
 accepting  -> CHALLENGE <nonce-a>
-connecting -> PROOF <HMAC-SHA256(secret, "YAMLINK connect <nonce-a> <nonce-c> <connecting-name>")>
-accepting  -> YAMLINK 3 <server-name> <nonce-a> <hex-known-server-names>
-              <HMAC-SHA256(secret, "YAMLINK accept <nonce-c> <nonce-a> <accepting-name>")>
+connecting -> PROOF <HMAC-SHA256(secret, "KELADILINK connect <nonce-a> <nonce-c> <connecting-name>")>
+accepting  -> KELADILINK 3 <server-name> <nonce-a> <hex-known-server-names>
+              <HMAC-SHA256(secret, "KELADILINK accept <nonce-c> <nonce-a> <accepting-name>")>
 ```
 
 Proofs are lowercase hex. The accepting side checks the caller's name and source

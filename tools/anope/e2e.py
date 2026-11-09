@@ -1,4 +1,4 @@
-"""End-to-end check of YamIRCd + Anope (ngircd protocol) with real client sockets.
+"""End-to-end check of KeladiIRCd + Anope (ngircd protocol) with real client sockets.
 
 Usage: python -I anope_e2e.py HOST PORT
 """
@@ -84,7 +84,7 @@ alice = Client("alice")
 alice.send("WHOIS NickServ")
 whois = alice.wait(" 318 ")
 check("NickServ is visible on the services server",
-      any(" 312 alice NickServ services.yamircd.test " in l for l in whois))
+      any(" 312 alice NickServ services.keladiircd.test " in l for l in whois))
 
 alice.send("PRIVMSG NickServ :REGISTER hunter2-secret")
 reply = alice.wait("NOTICE alice", 10) + alice.lines(2)
@@ -147,7 +147,7 @@ whois = watcher.wait(" 318 ")
 check("Others see the vhost in WHOIS",
       any(" 311 watcher alice ~alice alice.vhost.test " in l for l in whois))
 
-# SASL PLAIN, checked by YamIRCd through Anope's JSON-RPC interface.
+# SASL PLAIN, checked by KeladiIRCd through Anope's JSON-RPC interface.
 dave = Client("dave", sasl=("alice", "hunter2-secret"))
 check("SASL PLAIN succeeds (903)", any(" 903 dave " in l for l in dave.welcome))
 check("SASL logs in before registration (900)",

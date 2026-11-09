@@ -1,4 +1,4 @@
-//! YamIRCd link protocol v2: authenticated tree links, replicated state, routed delivery.
+//! KeladiIRCd link protocol v2: authenticated tree links, replicated state, routed delivery.
 //! This is deliberately not an UnrealIRCd wire protocol implementation.
 use super::*;
 use std::{
@@ -147,7 +147,7 @@ pub(super) fn validate_config(config: &Config) -> io::Result<()> {
 }
 
 impl Server {
-    /// Sends a YamIRCd frame; a services link receives it translated to its protocol.
+    /// Sends a KeladiIRCd frame; a services link receives it translated to its protocol.
     pub(super) fn link_send(&self, id: u64, line: &str) {
         let Some(link) = self.links.get(&id) else {
             return;
@@ -768,10 +768,10 @@ impl Server {
 /// so an unauthenticated caller learns only a nonce. Returns the peer's known
 /// server names (hex-decoded, comma separated), used to reject cycles.
 ///
-///   connecting: YAMLINK <version> <name> <nonce> <hex-names>
+///   connecting: KELADILINK <version> <name> <nonce> <hex-names>
 ///   accepting:  CHALLENGE <nonce>
 ///   connecting: PROOF <proof of connect>
-///   accepting:  YAMLINK <version> <name> <nonce> <hex-names> <proof of accept>
+///   accepting:  KELADILINK <version> <name> <nonce> <hex-names> <proof of accept>
 fn handshake(
     socket: &mut TcpStream,
     reader: &mut impl BufRead,
@@ -796,7 +796,7 @@ fn handshake(
     if let Some(first) = first {
         // Accepting: the caller's name and source IP already selected `config`.
         let p: Vec<_> = first.split(' ').collect();
-        if p.len() != 5 || p[0] != "YAMLINK" || p[1] != PROTOCOL_VERSION || p[2] != config.name {
+        if p.len() != 5 || p[0] != "KELADILINK" || p[1] != PROTOCOL_VERSION || p[2] != config.name {
             return Err(denied());
         }
         let theirs = p[3];
@@ -813,12 +813,13 @@ fn handshake(
             return Err(denied());
         }
         let proof = crypto::link_proof(secret, "accept", theirs, &ours, &me);
-        let hello = format!("YAMLINK {PROTOCOL_VERSION} {me} {ours} {known} {proof}\r\n");
+        let hello = format!("KELADILINK {PROTOCOL_VERSION} {me} {ours} {known} {proof}\r\n");
         socket.write_all(hello.as_bytes())?;
         Ok(names)
     } else {
-        socket
-            .write_all(format!("YAMLINK {PROTOCOL_VERSION} {me} {ours} {known}\r\n").as_bytes())?;
+        socket.write_all(
+            format!("KELADILINK {PROTOCOL_VERSION} {me} {ours} {known}\r\n").as_bytes(),
+        )?;
         let challenge = read_line(reader)?;
         let theirs = challenge
             .strip_prefix("CHALLENGE ")
@@ -831,7 +832,7 @@ fn handshake(
         let p: Vec<_> = hello.split(' ').collect();
         let expected = crypto::link_proof(secret, "accept", &ours, &theirs, &config.name);
         if p.len() != 6
-            || p[0] != "YAMLINK"
+            || p[0] != "KELADILINK"
             || p[1] != PROTOCOL_VERSION
             || p[2] != config.name
             || p[3] != theirs
@@ -897,7 +898,7 @@ fn session(
         None
     };
     // Services (such as Anope) speak the ngIRCd protocol, which starts with PASS.
-    if let Some(first) = incoming.as_ref().filter(|l| !l.starts_with("YAMLINK ")) {
+    if let Some(first) = incoming.as_ref().filter(|l| !l.starts_with("KELADILINK ")) {
         return services::session(socket, reader, state, first.clone(), remote_ip);
     }
     let config = {
@@ -1017,7 +1018,7 @@ pub(super) fn start(state: Arc<Mutex<Server>>) -> io::Result<()> {
         return Ok(());
     };
     let listener = TcpListener::bind(&address)?;
-    eprintln!("YamIRCd link listener on {}", listener.local_addr()?);
+    eprintln!("KeladiIRCd link listener on {}", listener.local_addr()?);
     let incoming_state = Arc::clone(&state);
     thread::spawn(move || {
         for socket in listener.incoming().flatten() {

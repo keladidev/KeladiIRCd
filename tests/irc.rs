@@ -13,19 +13,19 @@ impl Daemon {
     }
 
     fn start_with(password: Option<&str>, extra: &[&str]) -> (Self, String) {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_yamircd"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_keladiircd"));
         cmd.args(["--listen", "127.0.0.1:0", "--name", "irc.test"])
             .args(extra)
-            .env_remove("YAMIRCD_PASSWORD")
+            .env_remove("KELADIIRCD_PASSWORD")
             .stderr(Stdio::piped());
         if let Some(password) = password {
-            cmd.env("YAMIRCD_PASSWORD", password);
+            cmd.env("KELADIIRCD_PASSWORD", password);
         }
         let mut daemon = Self(cmd.spawn().unwrap(), None);
         let mut log = BufReader::new(daemon.0.stderr.take().unwrap());
         let mut line = String::new();
         log.read_line(&mut line).unwrap();
-        assert!(line.starts_with("YamIRCd listening on "), "{line}");
+        assert!(line.starts_with("KeladiIRCd listening on "), "{line}");
         let address = line.split_whitespace().nth(3).unwrap().to_string();
         std::thread::spawn(move || for _ in log.lines() {});
         (daemon, address)
@@ -37,9 +37,9 @@ impl Daemon {
             .unwrap()
             .as_nanos();
         let path =
-            std::env::temp_dir().join(format!("yamircd-{}-{unique}.conf", std::process::id()));
+            std::env::temp_dir().join(format!("keladiircd-{}-{unique}.conf", std::process::id()));
         std::fs::write(&path, rows).unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_yamircd"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_keladiircd"))
             .args([
                 "--listen",
                 "127.0.0.1:0",
@@ -50,7 +50,7 @@ impl Daemon {
                 "--config",
             ])
             .arg(&path)
-            .env_remove("YAMIRCD_PASSWORD")
+            .env_remove("KELADIIRCD_PASSWORD")
             .env("TEST_LINK_SECRET", "link-secret")
             .env("TEST_OPER_SECRET", "oper-secret")
             .stderr(Stdio::piped())
@@ -59,11 +59,11 @@ impl Daemon {
         let mut log = BufReader::new(child.stderr.take().unwrap());
         let mut line = String::new();
         log.read_line(&mut line).unwrap();
-        assert!(line.starts_with("YamIRCd listening on "), "{line}");
+        assert!(line.starts_with("KeladiIRCd listening on "), "{line}");
         let client_address = line.split_whitespace().nth(3).unwrap().to_string();
         line.clear();
         log.read_line(&mut line).unwrap();
-        assert!(line.starts_with("YamIRCd link listener on "), "{line}");
+        assert!(line.starts_with("KeladiIRCd link listener on "), "{line}");
         let link_address = line.split_whitespace().nth(4).unwrap().to_string();
         std::thread::spawn(move || for _ in log.lines() {});
         (Self(child, Some(path)), client_address, link_address)
@@ -177,7 +177,7 @@ fn link_handshake(
     let mut reader = BufReader::new(socket.try_clone().unwrap());
     let ours = "0123456789abcdef0123456789abcdef";
     socket
-        .write_all(format!("YAMLINK 3 {name} {ours} {}\r\n", hex(known)).as_bytes())
+        .write_all(format!("KELADILINK 3 {name} {ours} {}\r\n", hex(known)).as_bytes())
         .unwrap();
     let mut challenge = String::new();
     reader.read_line(&mut challenge).unwrap();
@@ -186,7 +186,7 @@ fn link_handshake(
         .strip_prefix("CHALLENGE ")
         .expect("Expected a CHALLENGE")
         .to_string();
-    let proof = yamircd::link_proof(secret, "connect", &theirs, ours, name);
+    let proof = keladiircd::link_proof(secret, "connect", &theirs, ours, name);
     socket
         .write_all(format!("PROOF {proof}\r\n").as_bytes())
         .unwrap();
@@ -194,7 +194,7 @@ fn link_handshake(
     if secret == "link-secret" {
         reader.read_line(&mut hello).unwrap();
         // The server's proof shows it knows the secret too.
-        let expected = yamircd::link_proof(secret, "accept", ours, &theirs, "a.test");
+        let expected = keladiircd::link_proof(secret, "accept", ours, &theirs, "a.test");
         assert!(hello.trim_end().ends_with(&expected), "{hello}");
     }
     (socket, reader, hello)
@@ -431,7 +431,7 @@ fn linked_servers_burst_remote_chat_operator_permissions_and_split() {
     // A correct proof is answered with the server's own proof, then cycles are refused.
     let (_cyclic, mut reader, hello) =
         link_handshake(&link_a, "b.test", "link-secret", "b.test,a.test");
-    assert!(hello.starts_with("YAMLINK 3 a.test "), "{hello}");
+    assert!(hello.starts_with("KELADILINK 3 a.test "), "{hello}");
     assert!(
         !hello.contains("6c696e6b2d736563726574"),
         "The secret crossed the wire"
@@ -811,7 +811,7 @@ impl Services {
             .unwrap();
     }
 
-    /// Lines from YamIRCd until a PONG answers this PING, proving nothing else was sent.
+    /// Lines from KeladiIRCd until a PONG answers this PING, proving nothing else was sent.
     fn sync(&mut self) -> Vec<String> {
         self.send(":services.test PING services.test :a.test");
         let mut lines = Vec::new();
@@ -853,7 +853,7 @@ fn services_link_speaks_ngircd_protocol() {
     // The handshake and burst introduce this server, its users and channels.
     let burst = services.sync();
     assert!(burst[0].starts_with("PASS link-secret 0210-IRC+ "));
-    assert_eq!(burst[1], "SERVER a.test 1 :YamIRC server");
+    assert_eq!(burst[1], "SERVER a.test 1 :KeladiIRC server");
     for expected in [
         ":a.test NICK Alice 1 guest 127.0.0.1 1 + :Test User",
         ":Alice JOIN #room",
@@ -1204,10 +1204,10 @@ fn sasl_plain_logs_in_through_anope_rpc() {
 
 #[test]
 fn proxy_listener_takes_the_users_address_from_the_header() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_yamircd"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_keladiircd"))
         .args(["--listen", "127.0.0.1:0", "--name", "irc.test"])
         .args(["--proxy-listen", "127.0.0.1:0"])
-        .env_remove("YAMIRCD_PASSWORD")
+        .env_remove("KELADIIRCD_PASSWORD")
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
@@ -1217,7 +1217,7 @@ fn proxy_listener_takes_the_users_address_from_the_header() {
     log.read_line(&mut line).unwrap();
     line.clear();
     log.read_line(&mut line).unwrap();
-    assert!(line.starts_with("YamIRCd PROXY listener on "), "{line}");
+    assert!(line.starts_with("KeladiIRCd PROXY listener on "), "{line}");
     let proxy = line.split_whitespace().nth(4).unwrap().to_string();
     std::thread::spawn(move || for _ in log.lines() {});
 

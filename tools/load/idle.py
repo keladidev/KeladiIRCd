@@ -1,4 +1,4 @@
-"""Scale check for a running YamIRCd: many idle users at once.
+"""Scale check for a running KeladiIRCd: many idle users at once.
 
 Usage: python -I idle.py HOST PORT [--clients 4000] [--pid PID]
 

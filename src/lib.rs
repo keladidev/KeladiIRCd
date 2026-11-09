@@ -63,7 +63,7 @@ impl Default for Config {
         Self {
             listen: "127.0.0.1:6667".into(),
             name: "irc.local".into(),
-            description: "YamIRC server".into(),
+            description: "KeladiIRC server".into(),
             password: None,
             link_listen: None,
             proxy_listen: None,
@@ -419,7 +419,7 @@ impl Server {
         if server == self.config.name {
             &self.config.description
         } else {
-            "YamIRC server"
+            "KeladiIRC server"
         }
     }
 
@@ -532,13 +532,13 @@ impl Server {
         self.numeric(
             id,
             1,
-            &format!(":Welcome to YamIRC {}", self.clients[&id].prefix()),
+            &format!(":Welcome to KeladiIRC {}", self.clients[&id].prefix()),
         );
         self.numeric(
             id,
             2,
             &format!(
-                ":Your host is {}, running version yamircd-0.1.0",
+                ":Your host is {}, running version keladiircd-0.1.0",
                 self.config.name
             ),
         );
@@ -546,9 +546,12 @@ impl Server {
         self.numeric(
             id,
             4,
-            &format!("{} yamircd-0.1.0 ioR biklmnorstv bklov", self.config.name),
+            &format!(
+                "{} keladiircd-0.1.0 ioR biklmnorstv bklov",
+                self.config.name
+            ),
         );
-        self.numeric(id, 5, &format!("CASEMAPPING=rfc1459 CHANTYPES=#& CHANMODES=b,k,l,imnrst PREFIX=(ov)@+ MAXLIST=b:{} NICKLEN=30 CHANNELLEN=50 USERLEN=12 TOPICLEN=300 CHANLIMIT=#&:20 NETWORK=YamIRC UTF8ONLY :are supported by this server", channel::MAX_BANS));
+        self.numeric(id, 5, &format!("CASEMAPPING=rfc1459 CHANTYPES=#& CHANMODES=b,k,l,imnrst PREFIX=(ov)@+ MAXLIST=b:{} NICKLEN=30 CHANNELLEN=50 USERLEN=12 TOPICLEN=300 CHANLIMIT=#&:20 NETWORK=KeladiIRC UTF8ONLY :are supported by this server", channel::MAX_BANS));
         self.lusers(id);
         self.motd(id);
         self.net_flood(None, &self.user_record(id));
@@ -598,7 +601,7 @@ impl Server {
             375,
             &format!(":- {} Message of the day -", self.config.name),
         );
-        self.numeric(id, 372, ":- Welcome to YamIRC. Be kind to each other.");
+        self.numeric(id, 372, ":- Welcome to KeladiIRC. Be kind to each other.");
         self.numeric(id, 376, ":End of /MOTD command.");
     }
 
@@ -871,7 +874,7 @@ impl Server {
                     self.numeric(
                         id,
                         364,
-                        &format!("{name} {} :1 YamIRC server", self.config.name),
+                        &format!("{name} {} :1 KeladiIRC server", self.config.name),
                     );
                 }
                 self.numeric(id, 365, "* :End of /LINKS list");
@@ -984,7 +987,7 @@ impl Server {
             }
             "PONG" => {
                 if p.last()
-                    .is_some_and(|token| token == &format!("yamircd-{id}"))
+                    .is_some_and(|token| token == &format!("keladiircd-{id}"))
                 {
                     self.clients.get_mut(&id).unwrap().ping = None;
                 }
@@ -1205,7 +1208,7 @@ impl Server {
             }
             "INFO" => {
                 for line in [
-                    "YamIRCd 0.1.0, a small standalone IRC daemon written in Rust.",
+                    "KeladiIRCd 0.1.0, a small standalone IRC daemon written in Rust.",
                     "Released under the MIT license.",
                 ] {
                     self.numeric(id, 371, &format!(":{line}"));
@@ -1266,7 +1269,7 @@ impl Server {
                 id,
                 351,
                 &format!(
-                    "yamircd-0.1.0 {} :Rust standalone IRC daemon",
+                    "keladiircd-0.1.0 {} :Rust standalone IRC daemon",
                     self.config.name
                 ),
             ),
@@ -1488,7 +1491,7 @@ impl Server {
             .map(|(&id, _)| id)
             .collect();
         for id in idle {
-            self.send(id, &format!("PING :yamircd-{id}"));
+            self.send(id, &format!("PING :keladiircd-{id}"));
             self.clients.get_mut(&id).unwrap().ping = Some(now);
         }
     }
@@ -1530,7 +1533,7 @@ pub fn serve(listener: TcpListener, config: Config) -> io::Result<()> {
     network::start(Arc::clone(&server))?;
     if let Some(address) = server.lock().unwrap().config.proxy_listen.clone() {
         let proxy = TcpListener::bind(&address)?;
-        eprintln!("YamIRCd PROXY listener on {}", proxy.local_addr()?);
+        eprintln!("KeladiIRCd PROXY listener on {}", proxy.local_addr()?);
         let server = Arc::clone(&server);
         thread::spawn(move || {
             for stream in proxy.incoming().flatten() {
@@ -1760,11 +1763,11 @@ mod tests {
         client.active = Instant::now() - Duration::from_secs(121);
         server.clients.insert(1, client);
         server.tick();
-        assert_eq!(rx.try_recv().unwrap(), "PING :yamircd-1\r\n");
+        assert_eq!(rx.try_recv().unwrap(), "PING :keladiircd-1\r\n");
         assert!(server.clients[&1].ping.is_some());
         server.command(1, parse("PONG :wrong-token").unwrap());
         assert!(server.clients[&1].ping.is_some());
-        server.command(1, parse("PONG :yamircd-1").unwrap());
+        server.command(1, parse("PONG :keladiircd-1").unwrap());
         assert!(server.clients[&1].ping.is_none());
         server.tick();
         assert!(rx.try_recv().is_err());

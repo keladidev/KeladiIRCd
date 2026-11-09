@@ -1,9 +1,9 @@
-"""Writes an Anope configuration for testing YamIRCd's services link.
+"""Writes an Anope configuration for testing KeladiIRCd's services link.
 
 Copies Anope's example configuration out of the test image, then changes only
 what the tests need: server name, uplink, the "ngircd" protocol module, nickname
 length, mail/registration settings so nicknames register without email, the
-JSON-RPC interface YamIRCd's SASL uses (httpd on port 8080, rpc_user, a token),
+JSON-RPC interface KeladiIRCd's SASL uses (httpd on port 8080, rpc_user, a token),
 and a services operator `alice` (for HostServ SET).
 
 Usage: python -I prepare.py OUT_DIR [--image IMAGE] [--uplink HOST] [--port PORT]
@@ -19,11 +19,11 @@ import tarfile
 
 parser = argparse.ArgumentParser()
 parser.add_argument("out", type=pathlib.Path)
-parser.add_argument("--image", default="yamircd-test-anope:2.1.27")
+parser.add_argument("--image", default="keladiircd-test-anope:2.1.27")
 parser.add_argument("--uplink", default="host.docker.internal")
 parser.add_argument("--port", type=int, default=7000)
 parser.add_argument("--password", default="services-secret")
-parser.add_argument("--name", default="services.yamircd.test")
+parser.add_argument("--name", default="services.keladiircd.test")
 parser.add_argument("--rpc-token", default="rpc-secret")
 parser.add_argument("--root", default="alice",
                     help="nickname made Services Root without /OPER; '' for none")

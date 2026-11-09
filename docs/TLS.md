@@ -1,6 +1,6 @@
 # TLS with a proxy
 
-YamIRCd has no TLS of its own, so it stays free of dependencies. Put a TLS proxy
+KeladiIRCd has no TLS of its own, so it stays free of dependencies. Put a TLS proxy
 in front of it instead. This guide uses [stunnel](https://www.stunnel.org/), which
 is small and packaged for every platform; [HAProxy](https://www.haproxy.org/) and
 nginx's `stream` module work the same way (examples at the end).
@@ -9,37 +9,37 @@ There are three kinds of connection to protect:
 
 | Connection | How |
 | --- | --- |
-| Clients (port 6697) | stunnel accepts TLS and passes each connection to YamIRCd's `--proxy-listen` port with a PROXY header, so YamIRCd sees the user's real address |
+| Clients (port 6697) | stunnel accepts TLS and passes each connection to KeladiIRCd's `--proxy-listen` port with a PROXY header, so KeladiIRCd sees the user's real address |
 | Server links | stunnel on both ends: client mode on the connecting server, server mode on the accepting one |
 | Anope | Anope connects with TLS itself (`ssl = yes`); stunnel accepts it in front of the link listener |
 
-Everything that YamIRCd listens on behind a proxy should listen on `127.0.0.1`
+Everything that KeladiIRCd listens on behind a proxy should listen on `127.0.0.1`
 only, so the proxy is the only way in.
 
 ## Clients
 
 Without help, every user arriving through a proxy would appear to come from
 `127.0.0.1`: the limit of 10 unregistered connections per address would apply to
-all of them together, and bans could not tell users apart. So YamIRCd has a
+all of them together, and bans could not tell users apart. So KeladiIRCd has a
 separate listener for proxies, `--proxy-listen`. Every connection to it must start
 with a [PROXY protocol](https://www.haproxy.org/download/2.9/doc/proxy-protocol.txt)
 version 1 line (`PROXY TCP4 <client-ip> <proxy-ip> <client-port> <proxy-port>`);
-YamIRCd takes the user's address from it and closes connections that lack one.
+KeladiIRCd takes the user's address from it and closes connections that lack one.
 Anyone who can reach this port can claim any address, so bind it to loopback (or
 firewall it to the proxy).
 
 ```sh
-yamircd --name irc.example.net \
+keladiircd --name irc.example.net \
   --listen 0.0.0.0:6667 \
   --proxy-listen 127.0.0.1:6668
 ```
 
 Drop `--listen 0.0.0.0:6667` (or use `127.0.0.1:6667`) to accept TLS clients only.
 
-`/etc/stunnel/yamircd.conf`:
+`/etc/stunnel/keladiircd.conf`:
 
 ```ini
-; Clients: TLS on 6697, plain IRC with a PROXY header to YamIRCd.
+; Clients: TLS on 6697, plain IRC with a PROXY header to KeladiIRCd.
 [irc-clients]
 accept = 0.0.0.0:6697
 connect = 127.0.0.1:6668
@@ -70,10 +70,10 @@ Links already prove the shared secret with a challenge-response handshake, so a
 stranger cannot link, but the traffic after it is plain text. Wrap it in TLS with
 stunnel on both servers. Here `a.example.net` connects to `b.example.net`.
 
-On **b** (accepting), YamIRCd listens for links on loopback only:
+On **b** (accepting), KeladiIRCd listens for links on loopback only:
 
 ```sh
-yamircd --name b.example.net --listen 0.0.0.0:6667 --link-listen 127.0.0.1:7000 --config b.conf
+keladiircd --name b.example.net --listen 0.0.0.0:6667 --link-listen 127.0.0.1:7000 --config b.conf
 ```
 
 ```ini
@@ -92,10 +92,10 @@ Because the link arrives from stunnel, its address is `127.0.0.1`, so b's link r
 names that as a's incoming address:
 
 ```text
-link a.example.net - 127.0.0.1 YAMIRCD_LINK_SECRET
+link a.example.net - 127.0.0.1 KELADIIRCD_LINK_SECRET
 ```
 
-On **a** (connecting), stunnel runs in client mode and YamIRCd connects to it:
+On **a** (connecting), stunnel runs in client mode and KeladiIRCd connects to it:
 
 ```ini
 ; a.example.net: local port 7101 is a TLS connection to b.
@@ -111,7 +111,7 @@ checkHost = b.example.net
 ```
 
 ```text
-link b.example.net 127.0.0.1:7101 127.0.0.1 YAMIRCD_LINK_SECRET
+link b.example.net 127.0.0.1:7101 127.0.0.1 KELADIIRCD_LINK_SECRET
 ```
 
 Self-signed certificates are fine for links, since each side pins the other's
@@ -131,7 +131,7 @@ Anope speaks TLS to its uplink itself. Load an SSL module in `modules.conf`
 (`module { name = "ssl_openssl" }` or `ssl_gnutls`; both are "extra" modules,
 enabled when Anope is built), and in `services.conf` set the uplink's `port` to
 the stunnel port and `ssl = yes`. (The test image in `tools/anope` is built
-without them.) On the YamIRCd server, stunnel
+without them.) On the KeladiIRCd server, stunnel
 accepts it in front of the link listener, exactly as for a server link (without
 `verifyPeer`, unless you give Anope a client certificate):
 
@@ -147,16 +147,16 @@ The services row's address becomes `127.0.0.1`, since Anope now arrives through
 stunnel:
 
 ```text
-services services.example.net 127.0.0.1 YAMIRCD_SERVICES_SECRET
+services services.example.net 127.0.0.1 KELADIIRCD_SERVICES_SECRET
 ```
 
 If Anope runs on the same machine, it can link to `127.0.0.1:7000` directly and
 needs no TLS at all.
 
-SASL passwords travel from YamIRCd to Anope's JSON-RPC interface over HTTP. Keep
+SASL passwords travel from KeladiIRCd to Anope's JSON-RPC interface over HTTP. Keep
 Anope's httpd on loopback (`ip = "127.0.0.1"` in its `httpd` block) or on a
 private network, since Anope's httpd can only add TLS with an SSL module
-(`ssl = yes`), which YamIRCd's plain HTTP client does not speak.
+(`ssl = yes`), which KeladiIRCd's plain HTTP client does not speak.
 
 ## HAProxy and nginx
 
@@ -166,15 +166,15 @@ HAProxy, for clients:
 frontend irc_tls
     mode tcp
     bind :6697 ssl crt /etc/haproxy/irc.example.net.pem
-    default_backend yamircd
+    default_backend keladiircd
 
-backend yamircd
+backend keladiircd
     mode tcp
     server local 127.0.0.1:6668 send-proxy
 ```
 
 `send-proxy` sends version 1 of the PROXY protocol; do not use `send-proxy-v2`,
-which YamIRCd does not read.
+which KeladiIRCd does not read.
 
 nginx (`stream` block, outside `http`):
 
@@ -196,6 +196,6 @@ nginx's `proxy_protocol on` sends version 1.
 
 - IRC clients cannot see whether another user is on TLS; there is no `+z`
   channel mode or `671` WHOIS line.
-- Client certificates (CertFP) do not reach YamIRCd or Anope, so NickServ's
+- Client certificates (CertFP) do not reach KeladiIRCd or Anope, so NickServ's
   certificate login is not available.
 - PROXY protocol version 2 (binary) is not supported; use version 1.

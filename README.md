@@ -1,4 +1,4 @@
-# YamIRCd
+# KeladiIRCd
 
 A dependency-free Rust IRC daemon for a small linked network. Implements a
 practical subset of the [Modern IRC Client Protocol](https://modern.ircdocs.horse/).
@@ -15,7 +15,7 @@ Connect an IRC client to `127.0.0.1`, port `6667`, with TLS disabled. Choose a
 nickname and join `#general`. The default listener is loopback; use
 `--listen 0.0.0.0:6667` to accept remote clients.
 
-Set `YAMIRCD_PASSWORD` to require a connection password via `PASS`. The password
+Set `KELADIIRCD_PASSWORD` to require a connection password via `PASS`. The password
 is read from the environment rather than a command-line argument. This is plain
 TCP: for TLS, put a proxy such as stunnel in front, as [docs/TLS.md](docs/TLS.md)
 describes; `--proxy-listen` accepts its connections with the users' real
@@ -122,7 +122,7 @@ A fake services server checks the services link handshake, burst, logins,
 forced nickname changes, kills, and that services' own changes are not echoed.
 
 [`tools/irctest`](tools/irctest) runs the irctest conformance suite against
-YamIRCd, and [`tools/anope`](tools/anope) runs a real Anope in Docker with an
+KeladiIRCd, and [`tools/anope`](tools/anope) runs a real Anope in Docker with an
 end-to-end check of NickServ and ChanServ. [`tools/load`](tools/load) is a load
 test: on a Windows desktop, 250 clients in one channel at 100 messages a second
 (about 25,000 deliveries a second) see 1.3 ms median and 2.5 ms 99th-percentile
@@ -131,7 +131,7 @@ PING round trip takes 1.2 ms.
 
 ## Linking two servers
 
-The [link protocol](docs/LINK_PROTOCOL.md) is YamIRCd-specific, inspired by
+The [link protocol](docs/LINK_PROTOCOL.md) is KeladiIRCd-specific, inspired by
 [UnrealIRCd's link configuration](https://www.unrealircd.org/docs/Link_block).
 It does **not** link directly to UnrealIRCd. Run one outgoing connection per edge
 of your network tree. Both peers need a configuration row and the same secret.
@@ -139,20 +139,20 @@ of your network tree. Both peers need a configuration row and the same secret.
 In each PowerShell terminal, set the secrets (replace these examples):
 
 ```powershell
-$env:YAMIRCD_NET_SECRET = 'replace-with-a-long-shared-secret'
-$env:YAMIRCD_ADMIN_SECRET = 'replace-with-a-different-operator-secret'
+$env:KELADIIRCD_NET_SECRET = 'replace-with-a-long-shared-secret'
+$env:KELADIIRCD_ADMIN_SECRET = 'replace-with-a-different-operator-secret'
 ```
 
 Run server A:
 
 ```powershell
-.\target\release\yamircd.exe --name a.local --listen 127.0.0.1:6667 --link-listen 127.0.0.1:7001 --config examples/a.conf
+.\target\release\keladiircd.exe --name a.local --listen 127.0.0.1:6667 --link-listen 127.0.0.1:7001 --config examples/a.conf
 ```
 
 Run server B in another terminal:
 
 ```powershell
-.\target\release\yamircd.exe --name b.local --listen 127.0.0.1:6668 --link-listen 127.0.0.1:7002 --config examples/b.conf
+.\target\release\keladiircd.exe --name b.local --listen 127.0.0.1:6668 --link-listen 127.0.0.1:7002 --config examples/b.conf
 ```
 
 Clients on either server can join the same `#general` and chat. `&local` channels
@@ -185,15 +185,15 @@ supports with its `ngircd` protocol module. Add a `services` row naming the
 services server, the IP it connects from, and the secret variable:
 
 ```text
-services services.example.net 127.0.0.1 YAMIRCD_SERVICES_SECRET
+services services.example.net 127.0.0.1 KELADIIRCD_SERVICES_SECRET
 ```
 
 In Anope's `services.conf`, set `serverinfo` `name` to the same server name, point
 `uplink` at the link listener with the same password, load `module { name = "ngircd" }`,
-and set `networkinfo` `nicklen = 30`. Services may link to any server of a YamIRCd
+and set `networkinfo` `nicklen = 30`. Services may link to any server of a KeladiIRCd
 network; users on every server see the service bots and can use them.
 
-Anope's ngIRCd module has no SASL, so YamIRCd checks SASL PLAIN logins itself
+Anope's ngIRCd module has no SASL, so KeladiIRCd checks SASL PLAIN logins itself
 through Anope's JSON-RPC interface (`anope.checkCredentials`), then tells
 services the user's account as usual. In Anope's `modules.conf`, load `httpd`
 (keep it on loopback or a private network), `jsonrpc` with a token allowed the
@@ -201,7 +201,7 @@ services the user's account as usual. In Anope's `modules.conf`, load `httpd`
 address, the page (`/jsonrpc`), and a variable holding the same token:
 
 ```text
-sasl 127.0.0.1:8080 /jsonrpc YAMIRCD_ANOPE_RPC_TOKEN
+sasl 127.0.0.1:8080 /jsonrpc KELADIIRCD_ANOPE_RPC_TOKEN
 ```
 
 Tested with Anope 2.1.27 (`tools/anope`): nickname registration, IDENTIFY and
@@ -215,7 +215,7 @@ privileges.
 
 Not supported: SVSJOIN and SVSPART, so NickServ AJOIN and OperServ SVSJOIN do not
 work. Anope's ngIRCd module never sends them (it does not mark the protocol as
-able to), so no change in YamIRCd can enable them.
+able to), so no change in KeladiIRCd can enable them.
 
 ## IRC operator privileges
 

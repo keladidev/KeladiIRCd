@@ -1,5 +1,5 @@
+use keladiircd::{serve, Config};
 use std::{env, io, net::TcpListener};
-use yamircd::{serve, Config};
 
 fn main() -> io::Result<()> {
     let mut config = Config::default();
@@ -19,7 +19,7 @@ fn main() -> io::Result<()> {
                 })?
             }
             "--help" | "-h" => {
-                println!("YamIRCd\nUsage: yamircd [--listen 127.0.0.1:6667] [--name irc.local] [--description \"YamIRC server\"] [--link-listen 127.0.0.1:7000] [--proxy-listen 127.0.0.1:6668] [--max-users 256] [--config yamircd.conf]\nOptional environment variable: YAMIRCD_PASSWORD (connection password)\nConfig rows: oper NAME IP_MASK local|global|override PASSWORD_ENV\n             link SERVER ADDRESS_OR_- INCOMING_IP PASSWORD_ENV\n             services SERVER INCOMING_IP PASSWORD_ENV\n             sasl ANOPE_HTTPD_ADDRESS JSONRPC_PATH TOKEN_ENV");
+                println!("KeladiIRCd\nUsage: keladiircd [--listen 127.0.0.1:6667] [--name irc.local] [--description \"KeladiIRC server\"] [--link-listen 127.0.0.1:7000] [--proxy-listen 127.0.0.1:6668] [--max-users 256] [--config keladiircd.conf]\nOptional environment variable: KELADIIRCD_PASSWORD (connection password)\nConfig rows: oper NAME IP_MASK local|global|override PASSWORD_ENV\n             link SERVER ADDRESS_OR_- INCOMING_IP PASSWORD_ENV\n             services SERVER INCOMING_IP PASSWORD_ENV\n             sasl ANOPE_HTTPD_ADDRESS JSONRPC_PATH TOKEN_ENV");
                 return Ok(());
             }
             _ => {
@@ -30,14 +30,16 @@ fn main() -> io::Result<()> {
             }
         }
     }
-    config.password = env::var("YAMIRCD_PASSWORD").ok().filter(|s| !s.is_empty());
+    config.password = env::var("KELADIIRCD_PASSWORD")
+        .ok()
+        .filter(|s| !s.is_empty());
     if let Some(path) = config_file {
         read_config(&path, &mut config)?;
     }
     config.validate()?;
     let listener = TcpListener::bind(&config.listen)?;
     eprintln!(
-        "YamIRCd listening on {} as {}",
+        "KeladiIRCd listening on {} as {}",
         listener.local_addr()?,
         config.name
     );
@@ -75,24 +77,24 @@ fn read_config(path: &str, config: &mut Config) -> io::Result<()> {
             .ok_or_else(invalid)?;
         match p[0] {
             "sasl" if config.sasl.is_none() => {
-                config.sasl = Some(yamircd::SaslConfig {
+                config.sasl = Some(keladiircd::SaslConfig {
                     address: p[1].into(),
                     path: p[2].into(),
                     token: password,
                 })
             }
-            "services" => config.services.push(yamircd::ServicesConfig {
+            "services" => config.services.push(keladiircd::ServicesConfig {
                 name: p[1].into(),
                 incoming_ip: p[2].parse().map_err(|_| invalid())?,
                 password,
             }),
-            "oper" => config.opers.push(yamircd::OperConfig {
+            "oper" => config.opers.push(keladiircd::OperConfig {
                 name: p[1].into(),
                 host: p[2].into(),
-                class: yamircd::OperClass::parse(p[3]).ok_or_else(invalid)?,
+                class: keladiircd::OperClass::parse(p[3]).ok_or_else(invalid)?,
                 password,
             }),
-            "link" => config.links.push(yamircd::LinkConfig {
+            "link" => config.links.push(keladiircd::LinkConfig {
                 name: p[1].into(),
                 address: if p[2] == "-" {
                     None
