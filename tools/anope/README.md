@@ -50,6 +50,13 @@ Run the commands from the repository root.
    python -I tools/anope/e2e.py 127.0.0.1 6667
    ```
 
+   For the `docker/` network, give Anope's name, and set `SERVICES_ROOT=alice`
+   in `docker/.env` so the HostServ check can pass after alice opers up:
+
+   ```sh
+   python -I tools/anope/e2e.py 127.0.0.1 6668 --services services.irc.test --oper admin <beta's oper password>
+   ```
+
    It prints the IRC traffic and a PASS/FAIL line per check, and exits non-zero
    on failure. Restart Anope before running it again, since it registers the
    nickname `alice`. To test a user on another server, link a second KeladiIRCd to

@@ -58,16 +58,36 @@ docker compose down
 NickServ and ChanServ registrations are kept in the `anope-data` volume. To
 delete them as well, run `docker compose down -v`.
 
+## Operators
+
+Each server has an operator login named `admin`, with its own password in
+`.env` (`ALPHA_OPER_SECRET`, `BETA_OPER_SECRET`, `CYPHER_OPER_SECRET`). Connect
+to that server and type:
+
+```text
+/OPER admin <that server's password>
+```
+
+The login only works from `172.30.0.1`, the address users on the Docker host
+appear to come from. The class is `override`; change it to `global` in the
+`.conf` file for fewer powers.
+
+For OperServ, HostServ `SET` and other services operator commands, set
+`SERVICES_ROOT` in `.env` to your nickname and run `docker compose up -d`. Then
+register and identify that nickname, and `/OPER`. Anope gives it Services Root
+only while it is both identified and an IRC operator, so registering the
+nickname alone is not enough.
+
 ## What is where
 
 | File | What it sets |
 | --- | --- |
 | `compose.yaml` | Containers, fixed addresses (`172.30.0.0/24`), published ports |
-| `alpha.conf` | Accepts beta, cypher and Anope; SASL row |
-| `beta.conf`, `cypher.conf` | Connect to alpha; SASL row |
+| `alpha.conf` | Accepts beta, cypher and Anope; SASL and operator rows |
+| `beta.conf`, `cypher.conf` | Connect to alpha; SASL and operator rows |
 | `keladiircd.Dockerfile` | KeladiIRCd release build |
 | `../tools/anope/Dockerfile` | The `network` target builds Anope's configuration (uplink `172.30.0.10`) |
-| `.env` | Link secrets and the JSON-RPC token (git ignores it) |
+| `.env` | Link, operator and JSON-RPC secrets, and `SERVICES_ROOT` (git ignores it) |
 
 Each container has a fixed address because KeladiIRCd link rows take IP addresses,
 not host names. If `172.30.0.0/24` clashes with a network you already use,
@@ -79,11 +99,9 @@ change the subnet and every `172.30.0.x` address in `compose.yaml`, the three
 - **Ports:** they are published on `127.0.0.1` only. To let other machines
   connect, change `127.0.0.1:6667:6667` to `6667:6667` (and likewise for 6668
   and 6669). Put the TLS proxy from [`docs/TLS.md`](../docs/TLS.md) in front
-  first, since plain IRC sends passwords in clear text.
-- **Services root:** none is configured, so HostServ `SET` and OperServ are not
-  usable yet. To add one, put an `oper` block in Anope's `services.conf` (see
-  `tools/anope/prepare.py --root`). That flag makes the nick root without
-  `/OPER`, so register the nick before anyone else can.
+  first, since plain IRC sends passwords in clear text. Users from other
+  machines cannot use the operator logins until you add their address (or `*`)
+  to the `oper` rows.
 - **Client addresses:** users connecting from the Docker host all appear to come
   from the network gateway (`172.30.0.1`). That means they share the limit of 10
   unregistered connections per address.

@@ -1,14 +1,24 @@
 """End-to-end check of KeladiIRCd + Anope (ngircd protocol) with real client sockets.
 
-Usage: python -I anope_e2e.py HOST PORT
+Usage: python -I e2e.py HOST PORT [--services NAME] [--oper NAME PASSWORD]
+
+--services is Anope's server name (prepare.py's default). --oper logs alice in
+as an IRC operator before the HostServ check, for networks where Anope's
+services root requires /OPER (the docker/ network with SERVICES_ROOT=alice).
 """
 
+import argparse
 import base64
 import socket
-import sys
 import time
 
-HOST, PORT = sys.argv[1], int(sys.argv[2])
+parser = argparse.ArgumentParser()
+parser.add_argument("host")
+parser.add_argument("port", type=int)
+parser.add_argument("--services", default="services.keladiircd.test")
+parser.add_argument("--oper", nargs=2, metavar=("NAME", "PASSWORD"))
+args = parser.parse_args()
+HOST, PORT = args.host, args.port
 failures = []
 
 
@@ -84,7 +94,7 @@ alice = Client("alice")
 alice.send("WHOIS NickServ")
 whois = alice.wait(" 318 ")
 check("NickServ is visible on the services server",
-      any(" 312 alice NickServ services.keladiircd.test " in l for l in whois))
+      any(f" 312 alice NickServ {args.services} " in l for l in whois))
 
 alice.send("PRIVMSG NickServ :REGISTER hunter2-secret")
 reply = alice.wait("NOTICE alice", 10) + alice.lines(2)
@@ -137,6 +147,9 @@ check("IDENTIFY logs a new connection in", any(" 900 alice " in l for l in ident
 check("IDENTIFY sets +R", any("MODE alice :+R" in l for l in ident))
 
 # HostServ (alice is a services operator in prepare.py's configuration).
+if args.oper:
+    carol.send(f"OPER {args.oper[0]} {args.oper[1]}")
+    check("OPER succeeds (381)", any(" 381 alice " in l for l in carol.lines(2)))
 carol.send("PRIVMSG HostServ :SET alice alice.vhost.test")
 vhost = carol.lines(3)
 check("HostServ SET applies the vhost (396)",
@@ -162,4 +175,4 @@ check("A failed SASL client still registers unauthenticated",
 
 print()
 print("FAILED: " + ", ".join(failures) if failures else "ALL CHECKS PASSED")
-sys.exit(1 if failures else 0)
+raise SystemExit(1 if failures else 0)
