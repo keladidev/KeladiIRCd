@@ -911,6 +911,14 @@ fn services_link_speaks_ngircd_protocol() {
         .any(|s| s.contains(" 312 Alice NickServ services.test ")));
     alice.send("PRIVMSG NickServ :help");
     assert_eq!(services.sync(), [":Alice PRIVMSG NickServ :help"]);
+    alice.send("NS identify alice hunter2\r\nnickserv help");
+    assert_eq!(
+        services.sync(),
+        [
+            ":Alice PRIVMSG NickServ :identify alice hunter2",
+            ":Alice PRIVMSG NickServ :help"
+        ]
+    );
 
     // Logins and +R reach the user, without being echoed to services.
     services.send(":services.test METADATA Alice accountname alice\r\n:NickServ MODE Alice +R\r\n:NickServ NOTICE Alice :You are now identified.");

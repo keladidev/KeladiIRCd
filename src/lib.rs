@@ -1029,6 +1029,19 @@ impl Server {
                 }
             }
             "PRIVMSG" | "NOTICE" => self.message(id, command, &p),
+            // Service shortcuts: "/cs register #room" reaches ChanServ as "register #room".
+            "NS" | "NICKSERV" | "CS" | "CHANSERV" | "MS" | "MEMOSERV" | "OS" | "OPERSERV"
+            | "BS" | "BOTSERV" | "HS" | "HOSTSERV" => {
+                let service = match &command[..1] {
+                    "N" => "NickServ",
+                    "C" => "ChanServ",
+                    "M" => "MemoServ",
+                    "O" => "OperServ",
+                    "B" => "BotServ",
+                    _ => "HostServ",
+                };
+                self.message(id, "PRIVMSG", &[service.to_string(), p.join(" ")]);
+            }
             "TOPIC" => {
                 let key = fold(&p[0]);
                 if let Some(ch) = self.channels.get(&key) {
