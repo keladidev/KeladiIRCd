@@ -586,7 +586,7 @@ pub(super) fn session(
         let me = state.config.name.clone();
         let link = &state.links[&id];
         link.raw(&format!(
-            "PASS {} 0210-IRC+ KeladiIRCd|0.1.0:CM P",
+            "PASS {} 0210-IRC+ KeladiIRCd|0.1.1:CM P",
             config.password
         ));
         link.raw(&format!("SERVER {me} 1 :{}", state.config.description));

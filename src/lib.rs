@@ -618,7 +618,7 @@ impl Server {
             id,
             2,
             &format!(
-                ":Your host is {}, running version keladiircd-0.1.0",
+                ":Your host is {}, running version keladiircd-0.1.1",
                 self.config.name
             ),
         );
@@ -627,7 +627,7 @@ impl Server {
             id,
             4,
             &format!(
-                "{} keladiircd-0.1.0 {} {} beIkloveqahLfFHj",
+                "{} keladiircd-0.1.1 {} {} beIkloveqahLfFHj",
                 self.config.name,
                 modes::USER_MODES,
                 modes::CHAN_MODES
@@ -1445,7 +1445,7 @@ impl Server {
             }
             "INFO" => {
                 for line in [
-                    "KeladiIRCd 0.1.0, a small standalone IRC daemon written in Rust.",
+                    "KeladiIRCd 0.1.1, a small standalone IRC daemon written in Rust.",
                     "Released under the MIT license.",
                 ] {
                     self.numeric(id, 371, &format!(":{line}"));
@@ -1506,7 +1506,7 @@ impl Server {
                 id,
                 351,
                 &format!(
-                    "keladiircd-0.1.0 {} :Rust standalone IRC daemon",
+                    "keladiircd-0.1.1 {} :Rust standalone IRC daemon",
                     self.config.name
                 ),
             ),
