@@ -127,13 +127,29 @@ and copy each server's `.pem` (not its `.key`) to the other.
 
 ## Anope
 
-Anope speaks TLS to its uplink itself. Load an SSL module in `modules.conf`
-(`module { name = "ssl_openssl" }` or `ssl_gnutls`; both are "extra" modules,
-enabled when Anope is built), and in `services.conf` set the uplink's `port` to
-the stunnel port and `ssl = yes`. (The test image in `tools/anope` is built
-without them.) On the KeladiIRCd server, stunnel
-accepts it in front of the link listener, exactly as for a server link (without
-`verifyPeer`, unless you give Anope a client certificate):
+Anope speaks TLS to its uplink itself, through its `ssl_openssl` (or
+`ssl_gnutls`) module. Both are "extra" modules that are only built on request.
+Install the OpenSSL headers (`libssl-dev` on Debian and Ubuntu), then link the
+module into Anope's source before building:
+
+```sh
+ln -s extra/ssl_openssl.cpp anope/modules/ssl_openssl.cpp
+```
+
+(The test image in `tools/anope` is built without it.) Then:
+
+- In `modules.conf`, enable the `ssl_openssl` block that is already there,
+  commented out (`#module` becomes `module`). Its `cert` and `key` are an
+  optional client certificate for the uplink. Without those files Anope logs
+  `Unable to open certificate conf/fullchain.pem` and connects anyway.
+- In `services.conf`, set the uplink's `port` to the stunnel port and
+  `ssl = yes`.
+
+On the KeladiIRCd server, stunnel accepts it in front of the link listener,
+exactly as for a server link (without `verifyPeer`, unless you give Anope a
+client certificate). stunnel then logs `No trusted certificates found`, which is
+expected here.
+
 
 ```ini
 [anope]
@@ -173,8 +189,10 @@ backend keladiircd
     server local 127.0.0.1:6668 send-proxy
 ```
 
-`send-proxy` sends version 1 of the PROXY protocol; do not use `send-proxy-v2`,
-which KeladiIRCd does not read.
+The `crt` file holds the certificate chain and the key together
+(`cat fullchain.pem privkey.pem > irc.example.net.pem`). `send-proxy` sends
+version 1 of the PROXY protocol; do not use `send-proxy-v2`, which KeladiIRCd
+does not read.
 
 nginx (`stream` block, outside `http`):
 
@@ -190,7 +208,16 @@ stream {
 }
 ```
 
-nginx's `proxy_protocol on` sends version 1.
+nginx's `proxy_protocol on` sends version 1. On Debian and Ubuntu the `stream`
+module is a separate package, `libnginx-mod-stream`.
+
+## Tested with
+
+Every configuration in this guide was run as written (with self-signed
+certificates in place of Let's Encrypt): stunnel 5.68 (Debian 12), HAProxy 2.8
+and nginx 1.26 for clients, with the user's real address in WHOIS; stunnel on
+both ends of a server link, refusing a certificate other than the pinned one;
+and Anope 2.1.27 with `ssl_openssl` linking through stunnel.
 
 ## What this does not give you
 
