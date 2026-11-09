@@ -1,4 +1,4 @@
-//! KeladiIRCd link protocol v2: authenticated tree links, replicated state, routed delivery.
+//! KeladiIRCd link protocol v3: authenticated tree links, replicated state, routed delivery.
 //! This is deliberately not an UnrealIRCd wire protocol implementation.
 use super::*;
 use std::{
@@ -845,11 +845,18 @@ fn handshake(
 }
 
 pub(super) fn read_line(reader: &mut impl BufRead) -> io::Result<String> {
+    read_line_within(reader, Duration::from_secs(10))
+}
+
+fn read_line_within(reader: &mut impl BufRead, limit: Duration) -> io::Result<String> {
     let mut bytes = Vec::new();
-    let started = Instant::now();
+    // Timed from the first byte: waiting for a line to start is bounded by the
+    // socket's read timeout (and the link heartbeat), not by this deadline.
+    let mut started = None;
+    let invalid = |why: &str| io::Error::new(io::ErrorKind::InvalidData, why.to_string());
     loop {
-        if started.elapsed() > Duration::from_secs(10) {
-            return Err(io::ErrorKind::InvalidData.into());
+        if started.is_some_and(|s: Instant| s.elapsed() > limit) {
+            return Err(invalid("line not finished within 10 seconds"));
         }
         let mut byte = [0];
         let count = reader.read(&mut byte).map_err(|err| {
@@ -859,7 +866,7 @@ pub(super) fn read_line(reader: &mut impl BufRead) -> io::Result<String> {
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 )
             {
-                io::Error::from(io::ErrorKind::InvalidData)
+                invalid("line stalled part way")
             } else {
                 err
             }
@@ -867,18 +874,19 @@ pub(super) fn read_line(reader: &mut impl BufRead) -> io::Result<String> {
         if count == 0 {
             return Err(io::ErrorKind::UnexpectedEof.into());
         }
+        started.get_or_insert_with(Instant::now);
         if byte[0] == b'\n' {
             break;
         }
         if bytes.len() >= LINK_LINE {
-            return Err(io::ErrorKind::InvalidData.into());
+            return Err(invalid("line too long"));
         }
         bytes.push(byte[0]);
     }
     if bytes.last() == Some(&b'\r') {
         bytes.pop();
     }
-    String::from_utf8(bytes).map_err(|_| io::ErrorKind::InvalidData.into())
+    String::from_utf8(bytes).map_err(|_| invalid("line is not UTF-8"))
 }
 
 fn session(
@@ -972,7 +980,11 @@ fn session(
                     break Ok(());
                 }
                 if server.link_line(id, &line, bursting).is_none() {
-                    break Err(io::ErrorKind::InvalidData.into());
+                    let shown: String = line.chars().take(200).collect();
+                    break Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("rejected frame: {shown}"),
+                    ));
                 }
                 if line == "END" {
                     bursting = false;
@@ -1076,6 +1088,32 @@ pub(super) fn start(state: Arc<Mutex<Server>>) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hands out each chunk after its delay, like a socket that is sometimes quiet.
+    struct Paced(std::collections::VecDeque<(u64, &'static [u8])>);
+    impl Read for Paced {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let Some((delay, chunk)) = self.0.pop_front() else {
+                return Ok(0);
+            };
+            thread::sleep(Duration::from_millis(delay));
+            buf[..chunk.len()].copy_from_slice(chunk);
+            Ok(chunk.len())
+        }
+    }
+
+    #[test]
+    fn line_deadline_starts_at_the_first_byte() {
+        let limit = Duration::from_millis(50);
+        // Idle time before a line is the heartbeat's business, not the line deadline's.
+        let mut late = BufReader::new(Paced([(100, &b"PING\r\n"[..])].into()));
+        assert_eq!(read_line_within(&mut late, limit).unwrap(), "PING");
+        // A line that trickles in slower than the limit is still refused.
+        let mut slow = BufReader::new(Paced([(0, &b"PI"[..]), (100, &b"NG\r\n"[..])].into()));
+        let err = read_line_within(&mut slow, limit).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
     #[test]
     fn wire_encoding() {
         for text in ["", "space and :colon", "héllo"] {
