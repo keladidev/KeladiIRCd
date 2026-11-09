@@ -1,0 +1,25 @@
+# Server A of the two-server example in README.md. B connects to A.
+# Secrets are never written here: each *_env key names an environment variable.
+# examples/keladiircd.toml explains every key.
+
+name = "a.local"
+listen = "127.0.0.1:6667"
+link_listen = "127.0.0.1:7001"
+
+# B dials in; A only accepts it from loopback (no `connect`, so A never dials out).
+[[link]]
+name = "b.local"
+incoming_ip = "127.0.0.1"
+password_env = "KELADIIRCD_NET_SECRET"
+
+[[oper]]
+name = "admin"
+ip_mask = "127.0.0.1"
+class = "override"
+password_env = "KELADIIRCD_ADMIN_SECRET"
+
+# Optional: Anope services linking with its "ngircd" module.
+# [[services]]
+# name = "services.local"
+# incoming_ip = "127.0.0.1"
+# password_env = "KELADIIRCD_SERVICES_SECRET"

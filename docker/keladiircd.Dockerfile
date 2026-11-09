@@ -10,3 +10,5 @@ RUN useradd --system --no-create-home keladiircd
 COPY --from=build /src/target/release/keladiircd /usr/local/bin/keladiircd
 USER keladiircd
 ENTRYPOINT ["keladiircd"]
+# Mount a TOML config here (see examples/keladiircd.toml), or pass other flags.
+CMD ["--config", "/etc/keladiircd.toml"]

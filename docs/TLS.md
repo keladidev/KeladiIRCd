@@ -26,12 +26,22 @@ with a [PROXY protocol](https://www.haproxy.org/download/2.9/doc/proxy-protocol.
 version 1 line (`PROXY TCP4 <client-ip> <proxy-ip> <client-port> <proxy-port>`);
 KeladiIRCd takes the user's address from it and closes connections that lack one.
 Anyone who can reach this port can claim any address, so bind it to loopback (or
-firewall it to the proxy).
+firewall it to the proxy). Users arriving through it count as TLS users: they get
+user mode `+z` and WHOIS `671`, may join `+z` channels, and may set `+Z`. Use this
+listener only behind a TLS proxy.
 
 ```sh
 keladiircd --name irc.example.net \
   --listen 0.0.0.0:6667 \
   --proxy-listen 127.0.0.1:6668
+```
+
+or, in the config file:
+
+```toml
+name = "irc.example.net"
+listen = "0.0.0.0:6667"
+proxy_listen = "127.0.0.1:6668"
 ```
 
 Drop `--listen 0.0.0.0:6667` (or use `127.0.0.1:6667`) to accept TLS clients only.
@@ -73,7 +83,7 @@ stunnel on both servers. Here `a.example.net` connects to `b.example.net`.
 On **b** (accepting), KeladiIRCd listens for links on loopback only:
 
 ```sh
-keladiircd --name b.example.net --listen 0.0.0.0:6667 --link-listen 127.0.0.1:7000 --config b.conf
+keladiircd --name b.example.net --listen 0.0.0.0:6667 --link-listen 127.0.0.1:7000 --config b.toml
 ```
 
 ```ini
@@ -88,11 +98,14 @@ verifyPeer = yes
 CAfile = /etc/stunnel/a.example.net.pem
 ```
 
-Because the link arrives from stunnel, its address is `127.0.0.1`, so b's link row
-names that as a's incoming address:
+Because the link arrives from stunnel, its address is `127.0.0.1`, so b's `[[link]]`
+block in `b.toml` names that as a's incoming address:
 
-```text
-link a.example.net - 127.0.0.1 KELADIIRCD_LINK_SECRET
+```toml
+[[link]]
+name = "a.example.net"
+incoming_ip = "127.0.0.1"
+password_env = "KELADIIRCD_LINK_SECRET"
 ```
 
 On **a** (connecting), stunnel runs in client mode and KeladiIRCd connects to it:
@@ -110,8 +123,12 @@ CAfile = /etc/stunnel/b.example.net.pem
 checkHost = b.example.net
 ```
 
-```text
-link b.example.net 127.0.0.1:7101 127.0.0.1 KELADIIRCD_LINK_SECRET
+```toml
+[[link]]
+name = "b.example.net"
+connect = "127.0.0.1:7101"
+incoming_ip = "127.0.0.1"
+password_env = "KELADIIRCD_LINK_SECRET"
 ```
 
 Self-signed certificates are fine for links, since each side pins the other's
@@ -159,11 +176,14 @@ cert = /etc/stunnel/b.example.net.pem
 key = /etc/stunnel/b.example.net.key
 ```
 
-The services row's address becomes `127.0.0.1`, since Anope now arrives through
-stunnel:
+The `[[services]]` block's `incoming_ip` becomes `127.0.0.1`, since Anope now
+arrives through stunnel:
 
-```text
-services services.example.net 127.0.0.1 KELADIIRCD_SERVICES_SECRET
+```toml
+[[services]]
+name = "services.example.net"
+incoming_ip = "127.0.0.1"
+password_env = "KELADIIRCD_SERVICES_SECRET"
 ```
 
 If Anope runs on the same machine, it can link to `127.0.0.1:7000` directly and
@@ -221,8 +241,6 @@ and Anope 2.1.27 with `ssl_openssl` linking through stunnel.
 
 ## What this does not give you
 
-- IRC clients cannot see whether another user is on TLS; there is no `+z`
-  channel mode or `671` WHOIS line.
 - Client certificates (CertFP) do not reach KeladiIRCd or Anope, so NickServ's
   certificate login is not available.
 - PROXY protocol version 2 (binary) is not supported; use version 1.

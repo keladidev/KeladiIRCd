@@ -100,7 +100,7 @@ alice.send("PRIVMSG NickServ :REGISTER hunter2-secret")
 reply = alice.wait("NOTICE alice", 10) + alice.lines(2)
 check("NickServ answers REGISTER", any("NickServ" in l and "registered" in l.lower() for l in reply))
 check("Registering logs in: account numeric 900", any(" 900 alice " in l for l in reply))
-check("Registering sets +R", any("MODE alice :+R" in l for l in reply))
+check("Registering sets +r", any("MODE alice :+r" in l for l in reply))
 alice.send("WHOIS alice")
 whois = alice.wait(" 318 ")
 check("WHOIS shows the account (330)", any(" 330 alice alice alice " in l for l in whois))
@@ -123,7 +123,7 @@ check("ChanServ's MODE reaches channel members",
 alice.send("PRIVMSG NickServ :LOGOUT")
 out = alice.lines(3)
 check("LOGOUT logs out (901)", any(" 901 alice " in l for l in out))
-check("LOGOUT clears +R", any("MODE alice :-R" in l for l in out))
+check("LOGOUT clears +r", any("MODE alice :-r" in l for l in out))
 
 # Anope 2.1's RECOVER kills the ghost, then moves the caller onto the nickname
 # with SVSNICK and logs them in.
@@ -144,7 +144,7 @@ carol.lines(3)
 carol.send("PRIVMSG NickServ :IDENTIFY hunter2-secret")
 ident = carol.lines(4)
 check("IDENTIFY logs a new connection in", any(" 900 alice " in l for l in ident))
-check("IDENTIFY sets +R", any("MODE alice :+R" in l for l in ident))
+check("IDENTIFY sets +r", any("MODE alice :+r" in l for l in ident))
 
 # HostServ (alice is a services operator in prepare.py's configuration).
 if args.oper:

@@ -31,7 +31,7 @@ pub(crate) fn validate_config(config: &Config) -> io::Result<()> {
         }
     }
     if !config.services.is_empty() && config.link_listen.is_none() {
-        return invalid("Configured services require --link-listen");
+        return invalid("Configured services require link_listen (or --link-listen)");
     }
     Ok(())
 }
@@ -65,11 +65,15 @@ fn split_source(line: &str) -> (Option<&str>, &str) {
     }
 }
 
+/// Channel modes Anope's ngircd module knows; others are kept from services, as
+/// their letters could be misread (a parameter mode taken for a flag).
+const SERVICES_FLAGS: &str = "iMmnOPQRrstVz";
+
 /// A user as services know it.
 struct Seen {
     nick: String,
     home: String,
-    /// Letters from `ioR`.
+    /// ngIRCd letters from `ioR`: R is KeladiIRCd's +r (identified).
     modes: String,
     account: String,
 }
@@ -82,6 +86,8 @@ struct SeenChannel {
     key: String,
     limit: usize,
     bans: Vec<String>,
+    excepts: Vec<String>,
+    invex: Vec<String>,
     topic: String,
     members: BTreeMap<String, u8>,
 }
@@ -120,10 +126,20 @@ fn mode_lines(me: &str, target: &str, changes: &[(bool, char, Option<String>)]) 
 }
 
 fn status_changes(old: u8, new: u8, nick: &str) -> Vec<(bool, char, Option<String>)> {
-    [(channel::OP, 'o'), (channel::VOICE, 'v')]
+    channel::STATUSES
         .iter()
-        .filter(|(bit, _)| old & bit != new & bit)
-        .map(|(bit, mode)| (new & bit != 0, *mode, Some(nick.to_string())))
+        .filter(|(bit, ..)| old & bit != new & bit)
+        .map(|(bit, mode, _)| (new & bit != 0, *mode, Some(nick.to_string())))
+        .collect()
+}
+
+/// List entries as services see them: plain masks only, as Anope's ngircd module
+/// knows no extended bans.
+fn plain(entries: &[String]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|e| !e.starts_with('~'))
+        .cloned()
         .collect()
 }
 
@@ -152,7 +168,7 @@ impl View {
             "ACCOUNT" => seen.account = param.into(),
             "UMODE" => {
                 seen.modes.retain(|c| c != 'R');
-                if param == "+R" {
+                if param == "+r" {
                     seen.modes.push('R');
                 }
             }
@@ -194,13 +210,12 @@ impl View {
                 ch.name, ch.limit, ch.topic
             )
         };
-        let bans: Vec<_> = ch
-            .bans
-            .iter()
-            .map(|ban| (true, 'b', Some(ban.clone())))
+        let entries: Vec<_> = [('b', &ch.bans), ('e', &ch.excepts), ('I', &ch.invex)]
+            .into_iter()
+            .flat_map(|(mode, list)| list.iter().map(move |e| (true, mode, Some(e.clone()))))
             .collect();
         let mut lines = vec![line];
-        lines.extend(mode_lines(me, &ch.name, &bans));
+        lines.extend(mode_lines(me, &ch.name, &entries));
         lines
     }
 
@@ -240,23 +255,22 @@ impl View {
                     ));
                 }
             }
-            ("USER", 11) => {
+            ("USER", 12) => {
                 let uid = p[1];
                 let home = uid.split('!').next()?.to_string();
                 let (nick, user, host, real) =
                     (decode(p[2])?, decode(p[3])?, decode(p[4])?, decode(p[5])?);
-                // The frame carries operator status as a class and the other modes as i/R.
+                // The frame carries operator status as a class; ngIRCd's +R is our +r.
                 let umodes = decode(p[8])?;
-                let modes: String = "ioR"
-                    .chars()
-                    .filter(|&c| {
-                        if c == 'o' {
-                            p[7] != "-"
-                        } else {
-                            umodes.contains(c)
-                        }
-                    })
-                    .collect();
+                let modes: String = [
+                    ('i', umodes.contains('i')),
+                    ('o', p[7] != "-"),
+                    ('R', umodes.contains('r')),
+                ]
+                .iter()
+                .filter(|(_, on)| *on)
+                .map(|(c, _)| *c)
+                .collect();
                 let account = decode(p[9])?;
                 if home == self.name {
                     // Service bots: services already know them.
@@ -349,21 +363,29 @@ impl View {
                     self.forget_user(&uid);
                 }
             }
-            ("CHAN", 13) => {
+            ("CHAN", 16) => {
                 let by = self.source(p[12], me).to_string();
                 let name = decode(p[1])?;
-                let bans = decode(p[11])?;
-                let new = SeenChannel {
-                    name,
-                    flags: decode(p[4])?,
-                    key: decode(p[5])?,
-                    limit: p[6].parse().ok()?,
-                    topic: decode(p[7])?,
-                    bans: bans
+                let list = |field: &str| -> Option<Vec<String>> {
+                    let entries: Vec<String> = decode(field)?
                         .split(',')
                         .filter(|b| !b.is_empty())
                         .map(String::from)
+                        .collect();
+                    Some(plain(&entries))
+                };
+                let new = SeenChannel {
+                    name,
+                    flags: decode(p[4])?
+                        .chars()
+                        .filter(|c| SERVICES_FLAGS.contains(*c))
                         .collect(),
+                    key: decode(p[5])?,
+                    limit: p[6].parse().ok()?,
+                    topic: decode(p[7])?,
+                    bans: list(p[11])?,
+                    excepts: list(p[14])?,
+                    invex: list(p[15])?,
                     members: BTreeMap::new(),
                 };
                 let topic_by = decode(p[8])?;
@@ -380,7 +402,7 @@ impl View {
                 });
                 if !old.members.is_empty() {
                     let mut changes = Vec::new();
-                    for c in "imnrst".chars() {
+                    for c in SERVICES_FLAGS.chars() {
                         if old.flags.contains(c) != new.flags.contains(c) {
                             changes.push((new.flags.contains(c), c, None));
                         }
@@ -399,11 +421,17 @@ impl View {
                             (true, 'l', Some(new.limit.to_string()))
                         });
                     }
-                    for ban in old.bans.iter().filter(|b| !new.bans.contains(b)) {
-                        changes.push((false, 'b', Some(ban.clone())));
-                    }
-                    for ban in new.bans.iter().filter(|b| !old.bans.contains(b)) {
-                        changes.push((true, 'b', Some(ban.clone())));
+                    for (mode, old, new) in [
+                        ('b', &old.bans, &new.bans),
+                        ('e', &old.excepts, &new.excepts),
+                        ('I', &old.invex, &new.invex),
+                    ] {
+                        for entry in old.iter().filter(|e| !new.contains(e)) {
+                            changes.push((false, mode, Some(entry.clone())));
+                        }
+                        for entry in new.iter().filter(|e| !old.contains(e)) {
+                            changes.push((true, mode, Some(entry.clone())));
+                        }
                     }
                     out.extend(mode_lines(&by, &old.name, &changes));
                     if old.topic != new.topic {
@@ -412,6 +440,7 @@ impl View {
                 }
                 (old.flags, old.key, old.limit, old.bans, old.topic) =
                     (new.flags, new.key, new.limit, new.bans, new.topic);
+                (old.excepts, old.invex) = (new.excepts, new.invex);
             }
             ("MEMBER", 8) => {
                 let name = decode(p[1])?;
@@ -442,7 +471,8 @@ impl View {
                         self.channels.remove(&key);
                     }
                 } else {
-                    let status: u8 = p[3].parse().ok()?;
+                    // Delayed join (+D) is not a status services know.
+                    let status: u8 = p[3].parse::<u8>().ok()? & !channel::HIDDEN;
                     match ch.members.insert(uid.into(), status) {
                         None => {
                             out.push(format!(":{nick} JOIN {}", ch.name));
@@ -700,14 +730,15 @@ impl Server {
                         self.channel_mode(actor, p);
                     }
                 } else if let Some(target) = self.user_for_services(&p[0]) {
-                    // Only +R (identified) is set by services; other user modes are ignored.
+                    // Only ngIRCd's +R (identified, our +r) is set by services; other user
+                    // modes are ignored.
                     let mut adding = true;
                     for mode in p[1].chars() {
                         match mode {
                             '+' => adding = true,
                             '-' => adding = false,
                             'R' => {
-                                let mode = if adding { "+R" } else { "-R" };
+                                let mode = if adding { "+r" } else { "-r" };
                                 self.services_force(link, target, &format!("UMODE {mode}"));
                             }
                             _ => {}
@@ -791,7 +822,7 @@ impl Server {
                 let opers: Vec<_> = self
                     .clients
                     .iter()
-                    .filter(|(id, c)| c.registered && c.oper.is_some() && !self.is_service(**id))
+                    .filter(|(id, c)| c.registered && c.has('w') && !self.is_service(**id))
                     .map(|(&id, _)| id)
                     .collect();
                 self.broadcast(opers, &line);
@@ -870,7 +901,10 @@ impl Server {
         (c.nick, c.user, c.real) = (nick.into(), user.into(), truncate(real, 128).into());
         c.registered = true;
         c.oper = modes.contains('o').then_some(OperClass::Override);
-        c.invisible = modes.contains('i');
+        c.umodes.insert('S');
+        if modes.contains('i') {
+            c.umodes.insert('i');
+        }
         self.clients.insert(id, c);
         self.note_peak();
         self.net_flood(None, &self.user_record(id));
@@ -943,5 +977,10 @@ mod tests {
         ];
         assert_eq!(mode_lines("me", "#c", &changes), [":me MODE #c +o-v a b"]);
         assert_eq!(status_changes(channel::OP, channel::VOICE, "n").len(), 2);
+        assert_eq!(
+            status_changes(0, channel::OWNER | channel::HALFOP, "n"),
+            [(true, 'q', Some("n".into())), (true, 'h', Some("n".into()))]
+        );
+        assert_eq!(plain(&["a!*@*".into(), "~account:x".into()]), ["a!*@*"]);
     }
 }

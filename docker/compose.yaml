@@ -12,14 +12,11 @@ x-keladiircd: &keladiircd
   image: keladiircd:local
   init: true # so Ctrl+C and `docker compose down` stop it at once
   restart: unless-stopped
+  # The image runs `keladiircd --config /etc/keladiircd.toml`; each server mounts its own file.
 
 services:
   alpha:
     <<: *keladiircd
-    command: >-
-      --name alpha.irc.test --description "alpha hub"
-      --listen 0.0.0.0:6667 --link-listen 0.0.0.0:7000
-      --config /etc/keladiircd.conf
     environment:
       BETA_LINK_SECRET: ${BETA_LINK_SECRET:?copy .env.example to .env}
       CYPHER_LINK_SECRET: ${CYPHER_LINK_SECRET:?copy .env.example to .env}
@@ -27,7 +24,7 @@ services:
       RPC_TOKEN: ${RPC_TOKEN:?copy .env.example to .env}
       ALPHA_OPER_SECRET: ${ALPHA_OPER_SECRET:?copy .env.example to .env}
     volumes:
-      - ./alpha.conf:/etc/keladiircd.conf:ro
+      - ./alpha.toml:/etc/keladiircd.toml:ro # name, listeners, links, opers
     ports:
       - 127.0.0.1:6667:6667
     networks:
@@ -36,16 +33,12 @@ services:
 
   beta:
     <<: *keladiircd
-    command: >-
-      --name beta.irc.test --description "beta leaf"
-      --listen 0.0.0.0:6667 --link-listen 0.0.0.0:7000
-      --config /etc/keladiircd.conf
     environment:
       BETA_LINK_SECRET: ${BETA_LINK_SECRET:?copy .env.example to .env}
       RPC_TOKEN: ${RPC_TOKEN:?copy .env.example to .env}
       BETA_OPER_SECRET: ${BETA_OPER_SECRET:?copy .env.example to .env}
     volumes:
-      - ./beta.conf:/etc/keladiircd.conf:ro
+      - ./beta.toml:/etc/keladiircd.toml:ro # name, listeners, links, opers
     ports:
       - 127.0.0.1:6668:6667
     networks:
@@ -55,16 +48,12 @@ services:
 
   cypher:
     <<: *keladiircd
-    command: >-
-      --name cypher.irc.test --description "cypher leaf"
-      --listen 0.0.0.0:6667 --link-listen 0.0.0.0:7000
-      --config /etc/keladiircd.conf
     environment:
       CYPHER_LINK_SECRET: ${CYPHER_LINK_SECRET:?copy .env.example to .env}
       RPC_TOKEN: ${RPC_TOKEN:?copy .env.example to .env}
       CYPHER_OPER_SECRET: ${CYPHER_OPER_SECRET:?copy .env.example to .env}
     volumes:
-      - ./cypher.conf:/etc/keladiircd.conf:ro
+      - ./cypher.toml:/etc/keladiircd.toml:ro # name, listeners, links, opers
     ports:
       - 127.0.0.1:6669:6667
     networks:

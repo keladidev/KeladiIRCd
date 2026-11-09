@@ -1,4 +1,4 @@
-# KeladiIRCd server protocol, version 4
+# KeladiIRCd server protocol, version 5
 
 This is a KeladiIRCd-specific protocol. It does **not** implement UnrealIRCd's
 `PROTOCTL`, `UID`, `SJOIN`, or other UnrealIRCd wire formats, and cannot link
@@ -24,10 +24,10 @@ the wire and a recorded handshake cannot be replayed. Nonces are 32 lowercase he
 digits, fresh for every connection.
 
 ```text
-connecting -> KELADILINK 4 <server-name> <nonce-c> <hex-comma-separated-known-server-names>
+connecting -> KELADILINK 5 <server-name> <nonce-c> <hex-comma-separated-known-server-names>
 accepting  -> CHALLENGE <nonce-a>
 connecting -> PROOF <HMAC-SHA256(secret, "KELADILINK connect <nonce-a> <nonce-c> <connecting-name>")>
-accepting  -> KELADILINK 4 <server-name> <nonce-a> <hex-known-server-names>
+accepting  -> KELADILINK 5 <server-name> <nonce-a> <hex-known-server-names>
               <HMAC-SHA256(secret, "KELADILINK accept <nonce-c> <nonce-a> <accepting-name>")>
 ```
 
@@ -41,7 +41,10 @@ Both peers must speak the same version: version 2 added channel modes, voice,
 invisible users, invitations, accounts and this handshake; version 3 added
 vhosts to USER, the registered channel mode `r`, and the acting user to CHAN and
 MEMBER (so services see who kicked or changed modes); version 4 added each
-server's uplink, distance and description to SERVER. Versions do not link with
+server's uplink, distance and description to SERVER; version 5 added
+UnrealIRCd's modes (more user modes and the cloaked host in USER, mode parameters
+and `+e`/`+I` lists in CHAN, owner/admin/halfop and delayed join in MEMBER, and
+HISTORY). Versions do not link with
 each other. Frames after the handshake are hex-framed, **not encrypted**. Use
 private loopback links or an encrypted tunnel for remote links
 ([TLS.md](TLS.md) shows stunnel).
@@ -64,16 +67,17 @@ a user owned by the receiver or by another branch of the tree.
 | Frame | Fields after command | Purpose |
 | --- | --- | --- |
 | SERVER | name uplink hops hex-description | Introduce a reachable server, as the sender sees it: hops counts links from the sender, and the receiver adds one and re-sends the frame from its own view. The sender introduces itself first, as `SERVER <own-name> - 0 <description>`; every other server's uplink must already be known through the same link. Descriptions are at most 100 bytes |
-| USER | uid hex-nick hex-user hex-host hex-realname hex-away oper-class hex-modes hex-account hex-vhost | Introduce/update a user; class is `-`, `local`, `global`, or `override`; modes are letters from `iR` (invisible, identified); the host is an IP or, for service bots, a hostname; the vhost (empty for none) is the host others see |
-| CHAN | hex-name revision revision-server hex-flags hex-key limit hex-topic hex-setter topic-time created hex-comma-separated-bans actor | Replicate channel metadata; flags are letters from `imnrst`, limit 0 = none; actor is the uid whose command made the change, or `-` (bursts) |
-| MEMBER | hex-channel uid status revision revision-server actor hex-kick-reason | Add/update membership; status bits 1 = operator, 2 = voice (0-3), `-` = removal; actor as for CHAN; a removal by KICK carries the reason, otherwise `-` |
+| USER | uid hex-nick hex-user hex-host hex-realname hex-away oper-class hex-modes hex-account hex-vhost hex-cloak | Introduce/update a user; class is `-`, `local`, `global`, or `override`; modes are user mode letters from `BdDGHIipqrRsSTwWxzZ` (`o` travels as the class, `t` follows the vhost); the host is an IP or, for service bots, a hostname; the vhost (empty for none) is the host others see; the cloak is the host shown while `+x` (empty for service bots) |
+| CHAN | hex-name revision revision-server hex-flags hex-key limit hex-topic hex-setter topic-time created hex-comma-separated-bans actor hex-params hex-comma-separated-excepts hex-comma-separated-invex | Replicate channel metadata; flags are letters from `cdimnprstzCDGKMNOPQRSTVZ`, limit 0 = none; actor is the uid whose command made the change, or `-` (bursts); params are space-separated mode letters with their values (`L#over j3:10 H15:1d`, from `fFHjL`). An empty channel is kept while `+P`, and ends when `-P` arrives |
+| MEMBER | hex-channel uid status revision revision-server actor hex-kick-reason | Add/update membership; status bits 1 operator, 2 voice, 4 halfop, 8 admin, 16 owner, 32 hidden by delayed join (0-63), `-` = removal; actor as for CHAN; a removal by KICK carries the reason, otherwise `-` |
+| HISTORY | hex-channel unix-time hex-line | A message to a `+H` channel, kept by every server for replay to its joiners |
 | WIRE | recipient-uid hex-client-message | Route one already-authorized client delivery |
 | REMOVE | uid hex-reason | Remove a quit/killed user |
 | COLLIDE | losing-uid | Resolve duplicate nicknames |
 | GLINE | hex-mask expires hex-setter hex-reason | Add a network ban; expires is Unix time, 0 = never. Each server disconnects its matching local users |
 | UNGLINE | hex-mask | Remove a network ban |
 | SPLIT | hex-comma-separated-server-names hex-reason | Remove unreachable servers and their users |
-| FORCE | actor target-uid hex-command | Route an action to the target's home server. The actor is an override operator's uid, or a services server reached through the sending link. Commands: `JOIN`/`PART <channels>`, `NICK <nick>`, `ACCOUNT [<name>]`, `UMODE +R`/`-R`, `VHOST [<host>]`, `VIDENT <user>` |
+| FORCE | actor target-uid hex-command | Route an action to the target's home server. The actor is an override operator's uid, or a services server reached through the sending link. Commands: `JOIN`/`PART <channels>`, `NICK <nick>`, `ACCOUNT [<name>]`, `UMODE +r`/`-r`, `VHOST [<host>]`, `VIDENT <user>` |
 | INVITED | target-uid hex-folded-channel | Record an invitation on the invitee's home server, which checks its JOINs |
 | END | none | Complete the initial state burst |
 | PING / PONG | none | Check link liveness |

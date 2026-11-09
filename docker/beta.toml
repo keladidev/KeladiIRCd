@@ -1,0 +1,25 @@
+# beta connects to alpha's link port and reconnects if the link drops.
+# Secrets come from the environment (see .env.example and compose.yaml).
+
+name = "beta.irc.test"
+description = "beta leaf"
+listen = "0.0.0.0:6667"
+link_listen = "0.0.0.0:7000"
+
+[[link]]
+name = "alpha.irc.test"
+connect = "172.30.0.10:7000"
+incoming_ip = "172.30.0.10"
+password_env = "BETA_LINK_SECRET"
+
+# SASL logins are checked against Anope directly over the internal network.
+[sasl]
+address = "172.30.0.20:8080"
+token_env = "RPC_TOKEN"
+
+# 172.30.0.1 is the Docker gateway: users on the Docker host appear to come from it.
+[[oper]]
+name = "admin"
+ip_mask = "172.30.0.1"
+class = "override"
+password_env = "BETA_OPER_SECRET"

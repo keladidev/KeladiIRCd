@@ -9,8 +9,10 @@ use std::{
 
 const LINK_LINE: usize = 8192;
 pub(super) const LINK_QUEUE: usize = 16384;
-/// Peers must speak the same version; v4 added uplinks, hops and descriptions to SERVER.
-const PROTOCOL_VERSION: &str = "4";
+/// Peers must speak the same version; v5 added UnrealIRCd's modes: more user modes and
+/// the cloaked host in USER, mode parameters and +e/+I lists in CHAN, five status
+/// bits plus delayed join in MEMBER, and HISTORY.
+const PROTOCOL_VERSION: &str = "5";
 
 /// Another server as seen from this one.
 pub(super) struct ServerInfo {
@@ -149,7 +151,7 @@ pub(super) fn validate_config(config: &Config) -> io::Result<()> {
     if !config.links.is_empty() && config.link_listen.is_none() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "Configured links require --link-listen",
+            "Configured links require link_listen (or --link-listen)",
         ));
     }
     Ok(())
@@ -187,8 +189,9 @@ impl Server {
 
     pub(super) fn user_record(&self, id: u64) -> String {
         let c = &self.clients[&id];
+        let modes: String = c.umodes.iter().collect();
         format!(
-            "USER {} {} {} {} {} {} {} {} {} {}",
+            "USER {} {} {} {} {} {} {} {} {} {} {}",
             c.uid,
             encode(&c.nick),
             encode(&c.user),
@@ -196,10 +199,11 @@ impl Server {
             encode(&c.real),
             encode(&c.away),
             c.oper.map(OperClass::name).unwrap_or("-"),
-            // Operator status travels as the class above; the modes field holds i and R.
-            encode(&c.modes().replace('o', "")),
+            // Operator status travels as the class above, and +t follows the vhost.
+            encode(&modes),
             encode(&c.account),
-            encode(&c.cloak)
+            encode(&c.cloak),
+            encode(&c.masked_host)
         )
     }
 
@@ -220,7 +224,7 @@ impl Server {
     /// `by` is the uid of the user whose command changed the channel, or `-`.
     fn channel_record(&self, ch: &Channel, by: &str) -> String {
         format!(
-            "CHAN {} {} {} {} {} {} {} {} {} {} {} {by}",
+            "CHAN {} {} {} {} {} {} {} {} {} {} {} {by} {} {} {}",
             encode(&ch.name),
             ch.revision,
             ch.revision_by,
@@ -231,7 +235,10 @@ impl Server {
             encode(&ch.topic_by),
             ch.topic_at,
             ch.created,
-            encode(&ch.bans.join(","))
+            encode(&ch.bans.join(",")),
+            encode(&ch.param_text()),
+            encode(&ch.excepts.join(",")),
+            encode(&ch.invex.join(","))
         )
     }
 
@@ -277,6 +284,12 @@ impl Server {
                     );
                     self.net_flood(None, &record);
                 }
+            }
+            // A channel kept only by +P ends with -P, once peers have heard of it.
+            let ch = &self.channels[&key];
+            if ch.members.is_empty() && !ch.has('P') && old.is_some_and(|o| o.has('P')) {
+                self.channels.remove(&key);
+                self.forget_channel(&key);
             }
         }
         for (key, old) in before.iter().filter(|(key, _)| key.starts_with('#')) {
@@ -465,7 +478,7 @@ impl Server {
                 self.servers.insert(name.into(), info);
                 self.net_flood(Some(link), &self.server_frame(name));
             }
-            "USER" if p.len() == 11 => {
+            "USER" if p.len() == 12 => {
                 if self.deleted_users.contains_key(p[1]) {
                     return Some(());
                 }
@@ -488,6 +501,7 @@ impl Server {
                     decode(p[6])?,
                 );
                 let (modes, account, cloak) = (decode(p[8])?, decode(p[9])?, decode(p[10])?);
+                let masked_host = decode(p[11])?;
                 let oper = if p[7] == "-" {
                     None
                 } else {
@@ -497,15 +511,16 @@ impl Server {
                     || !username_valid(&user)
                     || !services::host_valid(&host)
                     || !(cloak.is_empty() || services::host_valid(&cloak))
+                    || !(masked_host.is_empty() || services::host_valid(&masked_host))
                     || real.len() > 128
                     || away.len() > 200
                     || p[1].len() > 120
-                    || !modes.chars().all(|c| "iR".contains(c))
+                    || !modes.chars().all(|c| modes::REPLICATED_UMODES.contains(c))
                     || !(account.is_empty() || services::account_valid(&account))
                 {
                     return None;
                 }
-                let (invisible, identified) = (modes.contains('i'), modes.contains('R'));
+                let umodes: BTreeSet<char> = modes.chars().collect();
                 let existing = self.uid_id(p[1]);
                 if existing.is_some_and(|id| self.clients[&id].route != Some(link)) {
                     return None;
@@ -534,10 +549,15 @@ impl Server {
                 if let Some(id) = existing {
                     if self.clients[&id].nick != nick {
                         self.remember_whowas(id);
+                        let old = &self.clients[&id].nick;
+                        self.sno(
+                            'N',
+                            &format!("Client nick change: {old} -> {nick} ({home})"),
+                        );
                     }
                     let c = self.clients.get_mut(&id)?;
                     (c.nick, c.user, c.cloak, c.away, c.oper) = (nick, user, cloak, away, oper);
-                    (c.invisible, c.identified, c.account) = (invisible, identified, account);
+                    (c.umodes, c.account, c.masked_host) = (umodes, account, masked_host);
                 } else {
                     if self.clients.len() >= self.network_users() {
                         return None;
@@ -548,15 +568,22 @@ impl Server {
                     let mut c = Client::new(p[1].into(), home.into(), host, tx, socket);
                     c.route = Some(link);
                     (c.oper, c.nick, c.user, c.real, c.away) = (oper, nick, user, real, away);
-                    (c.invisible, c.identified, c.account) = (invisible, identified, account);
+                    (c.umodes, c.account, c.masked_host) = (umodes, account, masked_host);
                     c.cloak = cloak;
                     c.registered = true;
+                    let text = format!(
+                        "Client connecting on {home}: {} (~{}@{})",
+                        c.nick,
+                        c.user,
+                        c.shown()
+                    );
                     self.clients.insert(id, c);
                     self.note_peak();
+                    self.sno('F', &text);
                 }
                 self.net_flood(Some(link), line);
             }
-            "CHAN" if p.len() == 13 => {
+            "CHAN" if p.len() == 16 => {
                 let name = decode(p[1])?;
                 let revision: u64 = p[2].parse().ok()?;
                 let origin = p[3];
@@ -567,19 +594,38 @@ impl Server {
                 let limit: usize = p[6].parse().ok()?;
                 let (topic, topic_by) = (decode(p[7])?, decode(p[8])?);
                 let (topic_at, created): (u64, u64) = (p[9].parse().ok()?, p[10].parse().ok()?);
-                let bans = decode(p[11])?;
-                let bans: Vec<String> = bans
-                    .split(',')
-                    .filter(|b| !b.is_empty())
-                    .map(String::from)
-                    .collect();
+                let list = |field: &str| -> Option<Vec<String>> {
+                    let entries: Vec<String> = decode(field)?
+                        .split(',')
+                        .filter(|b| !b.is_empty())
+                        .map(String::from)
+                        .collect();
+                    (entries.len() <= channel::MAX_BANS && entries.iter().all(|b| b.len() <= 110))
+                        .then_some(entries)
+                };
+                let (bans, excepts, invex) = (list(p[11])?, list(p[14])?, list(p[15])?);
+                let mut params = BTreeMap::new();
+                for param in decode(p[13])?.split(' ').filter(|s| !s.is_empty()) {
+                    let mode = param.chars().next()?;
+                    let value = &param[1..];
+                    let valid = value.len() <= 100
+                        && match mode {
+                            'f' => modes::parse_flood(value).is_some(),
+                            'F' => modes::flood_profile(value).is_some(),
+                            'H' => modes::parse_history(value).is_some(),
+                            'j' => modes::parse_throttle(value).is_some(),
+                            'L' => value.starts_with('#') && channel_valid(value),
+                            _ => false,
+                        };
+                    if !valid || params.insert(mode, value.to_string()).is_some() {
+                        return None;
+                    }
+                }
                 if topic.len() > 300
                     || topic_by.len() > 128
-                    || !flags.chars().all(|c| "imnrst".contains(c))
+                    || !flags.chars().all(|c| modes::CHAN_FLAGS.contains(c))
                     || p[12].len() > 120
                     || !(chan_key.is_empty() || channel::key_valid(&chan_key))
-                    || bans.len() > channel::MAX_BANS
-                    || bans.iter().any(|b| b.len() > 110)
                 {
                     return None;
                 }
@@ -594,6 +640,7 @@ impl Server {
                     .entry(key)
                     .or_insert_with(|| placeholder_channel(&name));
                 if (revision, origin) > (ch.revision, ch.revision_by.as_str()) {
+                    let permanent = ch.has('P');
                     ch.revision = revision;
                     ch.revision_by = origin.into();
                     ch.topic = topic;
@@ -601,6 +648,13 @@ impl Server {
                     ch.topic_at = topic_at;
                     ch.set_flags(&flags);
                     (ch.key, ch.limit, ch.bans, ch.created) = (chan_key, limit, bans, created);
+                    (ch.params, ch.excepts, ch.invex) = (params, excepts, invex);
+                    // An empty channel kept by +P ends with -P.
+                    if permanent && !ch.has('P') && ch.members.is_empty() {
+                        let key = fold(&name);
+                        self.channels.remove(&key);
+                        self.forget_channel(&key);
+                    }
                 }
                 self.net_flood(Some(link), line);
             }
@@ -646,8 +700,8 @@ impl Server {
                 if p[3] == "-" {
                     self.remove_member(id, &key);
                 } else {
-                    // Status bits: 1 = channel operator, 2 = voice.
-                    let status: u8 = p[3].parse().ok().filter(|s| *s <= 3)?;
+                    // Status bits: 1 operator, 2 voice, 4 halfop, 8 admin, 16 owner, 32 hidden.
+                    let status: u8 = p[3].parse().ok().filter(|s| *s < 64)?;
                     if self
                         .channels
                         .values()
@@ -677,11 +731,10 @@ impl Server {
                     if bursting && new {
                         // Burst memberships carry no JOIN line, and servers further on
                         // receive them as ordinary updates, so this server announces the
-                        // join to every member not on the bursting side.
+                        // join to every member not on the bursting side who sees it.
                         let recipients: Vec<_> = self.channels[&key]
-                            .members
-                            .keys()
-                            .copied()
+                            .audience(id)
+                            .into_iter()
                             .filter(|other| *other != id && self.clients[other].route != Some(link))
                             .collect();
                         self.broadcast(
@@ -709,6 +762,15 @@ impl Server {
                 let reason = decode(p[2])?;
                 self.remember_deleted(p[1]);
                 if let Some(id) = self.uid_id(p[1]) {
+                    let c = &self.clients[&id];
+                    let text = format!(
+                        "Client exiting at {}: {} (~{}@{}) [{reason}]",
+                        c.home,
+                        c.nick,
+                        c.user,
+                        c.shown()
+                    );
+                    self.sno('F', &text);
                     self.remove_network_user(id, &reason, false);
                 }
                 self.net_flood(Some(link), line);
@@ -770,7 +832,7 @@ impl Server {
                     ("VHOST", []) => true,
                     ("VHOST", [host]) => services::host_valid(host),
                     ("VIDENT", [user]) => username_valid(user),
-                    ("UMODE", [mode]) => matches!(mode.as_str(), "+R" | "-R"),
+                    ("UMODE", [mode]) => matches!(mode.as_str(), "+r" | "-r"),
                     ("ACCOUNT", []) => true,
                     ("ACCOUNT", [account]) => services::account_valid(account),
                     _ => false,
@@ -795,6 +857,17 @@ impl Server {
                 }
                 self.record_invite(target, &key);
             }
+            "HISTORY" if p.len() == 4 => {
+                // HISTORY <hex-channel> <unix time> <hex-line>: a message kept for +H.
+                let name = decode(p[1])?;
+                let at: u64 = p[2].parse().ok()?;
+                let text = decode(p[3])?;
+                if !name.starts_with('#') || !channel_valid(&name) || text.len() > MAX_LINE {
+                    return None;
+                }
+                self.remember(&fold(&name), at, text);
+                self.net_flood(Some(link), line);
+            }
             "GLINE" if p.len() == 5 => {
                 self.gline_frame(&p)?;
                 self.net_flood(Some(link), line);
@@ -804,7 +877,8 @@ impl Server {
                 self.net_flood(Some(link), line);
             }
             "END" if p.len() == 1 => {
-                self.channels.retain(|_, ch| !ch.members.is_empty());
+                self.channels
+                    .retain(|_, ch| !ch.members.is_empty() || ch.has('P'));
             }
             _ => return None,
         }
@@ -1205,11 +1279,13 @@ mod tests {
         // Records carry modes (including services' +r), key, limit, bans and voice.
         let chan = |flags: &str| {
             format!(
-                "CHAN {} 10 b.test {} {} 5 - - 0 100 {} -",
+                "CHAN {} 10 b.test {} {} 5 - - 0 100 {} - {} {} -",
                 encode("#X"),
                 encode(flags),
                 encode("beer"),
-                encode("a!*@*,b!*@*")
+                encode("a!*@*,b!*@*"),
+                encode("L#over j3:10"),
+                encode("~account:alice")
             )
         };
         assert!(server.link_line(7, &chan("imrt"), false).is_some());
@@ -1219,9 +1295,20 @@ mod tests {
             ("imrt", "beer", 5)
         );
         assert_eq!((ch.bans.len(), ch.created), (2, 100));
+        assert_eq!(
+            (ch.param_text().as_str(), ch.excepts.len()),
+            ("L#over j3:10", 1)
+        );
         let voice = format!("MEMBER {} b.test!1!1 2 6 b.test - -", encode("#X"));
         assert!(server.link_line(7, &voice, false).is_some());
         assert_eq!(server.channels["#x"].members.get(&1), Some(&channel::VOICE));
         assert!(server.link_line(7, &chan("x"), false).is_none());
+        let owner = format!("MEMBER {} b.test!1!1 48 7 b.test - -", encode("#X"));
+        assert!(server.link_line(7, &owner, false).is_some());
+        assert_eq!(
+            server.channels["#x"].members.get(&1),
+            Some(&(channel::OWNER | channel::HIDDEN))
+        );
+        assert!(server.link_line(7, &chan("PCz"), false).is_some());
     }
 }

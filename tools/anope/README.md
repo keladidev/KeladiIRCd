@@ -16,25 +16,31 @@ Run the commands from the repository root.
    python -I tools/anope/prepare.py anope-conf
    ```
 
-3. Start KeladiIRCd with a services row, a sasl row and a link listener. With a
-   file `services-test.conf` containing
+3. Start KeladiIRCd with a `[[services]]` block, a `[sasl]` section and a link
+   listener. With a file `services-test.toml` containing
 
-   ```text
-   services services.keladiircd.test 127.0.0.1 ANOPE_SECRET
-   sasl 127.0.0.1:8080 /jsonrpc ANOPE_RPC_TOKEN
+   ```toml
+   [[services]]
+   name = "services.keladiircd.test"
+   incoming_ip = "127.0.0.1"
+   password_env = "ANOPE_SECRET"
+
+   [sasl]
+   address = "127.0.0.1:8080"
+   token_env = "ANOPE_RPC_TOKEN"
    ```
 
    ```powershell
    $env:ANOPE_SECRET = 'services-secret'
    $env:ANOPE_RPC_TOKEN = 'rpc-secret'
-   .\target\release\keladiircd.exe --name irc.keladiircd.test --listen 127.0.0.1:6667 --link-listen 127.0.0.1:7000 --config services-test.conf
+   .\target\release\keladiircd.exe --name irc.keladiircd.test --listen 127.0.0.1:6667 --link-listen 127.0.0.1:7000 --config services-test.toml
    ```
 
    On Docker Desktop, a container reaching `host.docker.internal` arrives at the
    host's loopback address, so `127.0.0.1` works for both the listener and the
-   services row. On Linux, listen on the Docker bridge address instead, pass
+   `[[services]]` block. On Linux, listen on the Docker bridge address instead, pass
    `--uplink` that address to `prepare.py`, and put the container's address in
-   the services row.
+   the `[[services]]` block's `incoming_ip`.
 
 4. Start Anope (it keeps no database between runs). Port 8080 is its JSON-RPC
    interface, which KeladiIRCd uses to check SASL logins:
@@ -43,7 +49,7 @@ Run the commands from the repository root.
    docker run --rm --name keladiircd-anope -p 127.0.0.1:8080:8080 -v "$PWD/anope-conf:/anope/conf" keladiircd-test-anope:2.1.27 --nodb --config=services.conf
    ```
 
-5. Run the checks (registration, IDENTIFY/LOGOUT, `+R`, accounts in WHOIS,
+5. Run the checks (registration, IDENTIFY/LOGOUT, `+r`, accounts in WHOIS,
    ChanServ and `+r`, RECOVER, HostServ vhosts, SASL PLAIN):
 
    ```sh

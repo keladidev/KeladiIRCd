@@ -1,0 +1,193 @@
+# KeladiIRCd configuration reference
+#
+# Start the server with:   keladiircd --config keladiircd.toml
+#
+# This file explains every key. Each top-level key below is set to its default,
+# so as it stands this file runs a single server on 127.0.0.1:6667 with no links,
+# operators, services or SASL. Copy it and change what you need.
+#
+# Format: TOML (https://toml.io). KeladiIRCd reads a small part of it: `key = value`
+# pairs, [section] and [[section]] headers, "double-quoted" or 'single-quoted'
+# strings, whole numbers, and # comments. A wrong key, value or line stops startup
+# with an error that names the line.
+#
+# Command-line flags (--name, --description, --listen, --link-listen,
+# --proxy-listen, --max-users) override the matching keys in this file.
+#
+# Secrets are never written in this file. Every key ending in `_env` names an
+# environment variable that holds the secret; startup stops if it is unset or empty.
+# The optional connection password (PASS) comes from KELADIIRCD_PASSWORD.
+#
+# Configuration is read once, at startup.
+
+
+# ── This server ──────────────────────────────────────────────────────────────
+
+# Server name, shown to users and to linked servers. 1-63 ASCII letters, digits,
+# dots or hyphens. Every server in a network needs a different name.
+name = "irc.local"
+
+# Shown in LINKS and WHOIS. 1-100 bytes on one line.
+description = "KeladiIRC server"
+
+# Address and port for plain IRC clients. "0.0.0.0:6667" accepts clients from any
+# network interface; "[::]:6667" for IPv6.
+listen = "127.0.0.1:6667"
+
+# Address for server links and services (Anope). Not set by default, which
+# means no links: [[link]] and [[services]] blocks need it.
+# link_listen = "127.0.0.1:7000"
+
+# A second client listener for a TLS proxy such as stunnel. Every connection to
+# it must start with a PROXY protocol v1 header carrying the user's real address
+# (docs/TLS.md). Keep it on loopback: whoever can reach it can claim any address.
+# Not set by default.
+# proxy_listen = "127.0.0.1:6668"
+
+# Connections this server accepts at once, registered or not. 1-100000.
+max_users = 256
+
+# User modes every client gets on connecting, like UnrealIRCd's modes-on-connect.
+# Letters from BdDGipRTwxZ, e.g. "+ixw" (invisible, cloaked, receives WALLOPS).
+# Default: none.
+modes_on_connect = ""
+
+# Words that channel mode +G and user mode +G replace with <censored>, separated
+# by spaces; * and ? are wildcards. Matching ignores case. Default: none.
+badwords = ""
+
+# Environment variable holding the secret for cloaked hosts (user mode +x). Give
+# every server in a network the same secret, so a user's cloak, and bans on it,
+# are the same everywhere. Not set by default: a random secret is chosen at each
+# start, so cloaks change on restart.
+# cloak_key_env = "KELADIIRCD_CLOAK_KEY"
+
+
+# ── Server links ─────────────────────────────────────────────────────────────
+#
+# One [[link]] block per directly linked KeladiIRCd server, at most 8. Both
+# servers need a block for each other, with the same secret. Link the servers as
+# a tree (no loops). See docs/LINK_PROTOCOL.md.
+#
+# [[link]]
+# # The peer's server name (its `name` key). Required.
+# name = "b.example.net"
+#
+# # Where to connect to the peer's link_listen, as a numeric IP:port (IPv6 in
+# # brackets: "[2001:db8::1]:7000"). Host names are not accepted. Leave it out
+# # on the side that only accepts the link; exactly one side should connect.
+# # Outgoing links retry every two seconds until they connect.
+# connect = "192.0.2.20:7000"
+#
+# # The exact IP address the peer connects from. Required: this server accepts
+# # the peer's own connection only from here, even when it also connects out.
+# incoming_ip = "192.0.2.20"
+#
+# # Environment variable holding the shared secret (up to 128 bytes). Required.
+# password_env = "KELADIIRCD_LINK_SECRET"
+
+
+# ── IRC operators ────────────────────────────────────────────────────────────
+#
+# One [[oper]] block per /OPER login. Logins work only from matching IPs.
+#
+# [[oper]]
+# # Login name for /OPER NAME PASSWORD, case sensitive. Must be a valid nickname.
+# name = "admin"
+#
+# # Client IP addresses allowed to use this login. `*` matches any run of
+# # characters and `?` one character, e.g. "192.0.2.*", or "*" for anywhere.
+# ip_mask = "127.0.0.1"
+#
+# # Privileges:
+# #   "local"    KILL local users, send WALLOPS to network operators
+# #   "global"   also KILL remote users, SQUIT direct links, CONNECT, KLINE, GLINE
+# #   "override" also bypass channel permission checks; SAJOIN, SAPART, SAMODE
+# class = "global"
+#
+# # Environment variable holding the password (up to 128 bytes). Required.
+# password_env = "KELADIIRCD_ADMIN_SECRET"
+
+
+# ── IRC services (Anope) ─────────────────────────────────────────────────────
+#
+# One [[services]] block per services server allowed to link to link_listen with
+# the ngIRCd protocol (Anope's "ngircd" module). README.md, "Linking IRC
+# services", shows the matching Anope settings.
+#
+# [[services]]
+# # Anope's serverinfo name. Must differ from every server and link name.
+# name = "services.example.net"
+#
+# # The exact IP address Anope connects from.
+# incoming_ip = "127.0.0.1"
+#
+# # Environment variable holding Anope's uplink password (no spaces).
+# password_env = "KELADIIRCD_SERVICES_SECRET"
+
+
+# ── SASL logins ──────────────────────────────────────────────────────────────
+#
+# At most one [sasl] section. With it, clients can log in with SASL PLAIN; the
+# password is checked through Anope's JSON-RPC interface (anope.checkCredentials).
+# Keep Anope's httpd on loopback or a private network.
+#
+# [sasl]
+# # Anope's httpd address, host:port. Required.
+# address = "127.0.0.1:8080"
+#
+# # The JSON-RPC page. Default: "/jsonrpc".
+# path = "/jsonrpc"
+#
+# # Environment variable holding a jsonrpc token allowed to call
+# # anope.checkCredentials. Required.
+# token_env = "KELADIIRCD_ANOPE_RPC_TOKEN"
+
+
+# ══ Common setups ════════════════════════════════════════════════════════════
+#
+# Single public server, one operator who can connect from anywhere:
+#
+#   name = "irc.example.net"
+#   listen = "0.0.0.0:6667"
+#
+#   [[oper]]
+#   name = "admin"
+#   ip_mask = "*"
+#   class = "override"
+#   password_env = "KELADIIRCD_ADMIN_SECRET"
+#
+# Two linked servers (examples/a.toml and examples/b.toml are a runnable copy).
+# a.example.net accepts, b.example.net connects:
+#
+#   # on a.example.net               # on b.example.net
+#   link_listen = "0.0.0.0:7000"     link_listen = "0.0.0.0:7000"
+#
+#   [[link]]                         [[link]]
+#   name = "b.example.net"           name = "a.example.net"
+#   incoming_ip = "192.0.2.20"       connect = "192.0.2.10:7000"
+#   password_env = "LINK_SECRET"     incoming_ip = "192.0.2.10"
+#                                    password_env = "LINK_SECRET"
+#
+# Anope services and SASL on the same machine:
+#
+#   link_listen = "127.0.0.1:7000"
+#
+#   [[services]]
+#   name = "services.example.net"
+#   incoming_ip = "127.0.0.1"
+#   password_env = "KELADIIRCD_SERVICES_SECRET"
+#
+#   [sasl]
+#   address = "127.0.0.1:8080"
+#   token_env = "KELADIIRCD_ANOPE_RPC_TOKEN"
+#
+# TLS through stunnel (docs/TLS.md): stunnel accepts TLS on 6697 and passes each
+# connection to proxy_listen with a PROXY header. Drop the plain listener to
+# serve TLS clients only (keep it on loopback, as here):
+#
+#   listen = "127.0.0.1:6667"
+#   proxy_listen = "127.0.0.1:6668"
+#
+# docker/alpha.toml, beta.toml and cypher.toml are a full three-server network
+# with Anope.

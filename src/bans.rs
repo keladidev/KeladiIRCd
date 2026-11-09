@@ -174,6 +174,8 @@ impl Server {
                     self.net_flood(None, &format!("UNGLINE {}", encode(&mask)));
                 }
                 notice(self, format!("{kind} removed for {mask}"));
+                let by = self.clients[&id].nick.clone();
+                self.sno('G', &format!("{kind} removed for {mask} by {by}"));
             } else {
                 notice(self, format!("No {kind} for {mask}"));
             }
@@ -186,6 +188,10 @@ impl Server {
         let setter = self.clients[&id].prefix();
         // Announce before enforcing, in case the ban removes the operator who set it.
         notice(self, format!("{kind} added for {mask}"));
+        self.sno(
+            'G',
+            &format!("{kind} added for {mask} by {setter}: {reason}"),
+        );
         if !self.add_server_ban(mask.clone(), seconds, reason, &setter, global) {
             notice(self, format!("The {kind} list is full"));
             return;

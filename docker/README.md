@@ -70,7 +70,7 @@ to that server and type:
 
 The login only works from `172.30.0.1`, the address users on the Docker host
 appear to come from. The class is `override`; change it to `global` in the
-`.conf` file for fewer powers.
+`.toml` file for fewer powers.
 
 For OperServ, HostServ `SET` and other services operator commands, set
 `SERVICES_ROOT` in `.env` to your nickname and run `docker compose up -d`. Then
@@ -83,16 +83,16 @@ nickname alone is not enough.
 | File | What it sets |
 | --- | --- |
 | `compose.yaml` | Containers, fixed addresses (`172.30.0.0/24`), published ports |
-| `alpha.conf` | Accepts beta, cypher and Anope; SASL and operator rows |
-| `beta.conf`, `cypher.conf` | Connect to alpha; SASL and operator rows |
+| `alpha.toml` | Server name and listeners; accepts beta, cypher and Anope; SASL and operator |
+| `beta.toml`, `cypher.toml` | Server name and listeners; connect to alpha; SASL and operator |
 | `keladiircd.Dockerfile` | KeladiIRCd release build |
 | `../tools/anope/Dockerfile` | The `network` target builds Anope's configuration (uplink `172.30.0.10`) |
 | `.env` | Link, operator and JSON-RPC secrets, and `SERVICES_ROOT` (git ignores it) |
 
-Each container has a fixed address because KeladiIRCd link rows take IP addresses,
+Each container has a fixed address because KeladiIRCd links match IP addresses,
 not host names. If `172.30.0.0/24` clashes with a network you already use,
 change the subnet and every `172.30.0.x` address in `compose.yaml`, the three
-`.conf` files and the `UPLINK` build argument together.
+`.toml` files and the `UPLINK` build argument together.
 
 ## Notes
 
@@ -101,7 +101,7 @@ change the subnet and every `172.30.0.x` address in `compose.yaml`, the three
   and 6669). Put the TLS proxy from [`docs/TLS.md`](../docs/TLS.md) in front
   first, since plain IRC sends passwords in clear text. Users from other
   machines cannot use the operator logins until you add their address (or `*`)
-  to the `oper` rows.
+  to the `ip_mask` of the `[[oper]]` blocks.
 - **Client addresses:** users connecting from the Docker host all appear to come
   from the network gateway (`172.30.0.1`). That means they share the limit of 10
   unregistered connections per address.

@@ -15,6 +15,9 @@ Connect an IRC client to `127.0.0.1`, port `6667`, with TLS disabled. Choose a
 nickname and join `#general`. The default listener is loopback; use
 `--listen 0.0.0.0:6667` to accept remote clients.
 
+Settings can also live in a TOML file, passed with `--config keladiircd.toml`;
+see [Configuration](#configuration).
+
 Set `KELADIIRCD_PASSWORD` to require a connection password via `PASS`. The password
 is read from the environment rather than a command-line argument. This is plain
 TCP: for TLS, put a proxy such as stunnel in front, as [docs/TLS.md](docs/TLS.md)
@@ -37,20 +40,19 @@ plus Anope), see [docker/README.md](docker/README.md).
 - `NICK`, `USER`, `PASS`, `CAP LS/LIST/REQ/END`, `PING`, `PONG`, `QUIT`.
 - Registration replies `001`–`005`, `LUSERS`, and `MOTD`; CAP negotiation delays
   registration until `CAP END`. The IRCv3 capabilities `multi-prefix` and
-  `userhost-in-names` are offered, and `sasl` (PLAIN) when a `sasl` row is
+  `userhost-in-names` are offered, and `sasl` (PLAIN) when a `[sasl]` section is
   configured (see Linking IRC services).
 - `JOIN` (including keys, multiple channels and `JOIN 0`), `PART`, `TOPIC`,
   `NAMES`, `LIST`, `INVITE`, and `KICK`.
-- Channel modes: `+b` bans (up to 60 masks, listed with `MODE #channel b`), `+k`
-  key, `+l` limit, `+i` invite-only, `+m` moderated, `+n` no external messages,
-  `+s` secret, `+t` protected topic, `+r` registered (set only by services), and
-  member status `+o`/`+v` (`@`/`+`).
-  Several changes are echoed as one MODE line; invalid keys or limits get `696`.
-- New channels start with `+nt`; the first member receives `@` operator status.
-  Channel operators may change modes and protected topics, or kick. Operator
-  status is not automatically reassigned when the last operator leaves. An
-  invitation lets a user past `+i`, `+b` and `+l`, but not a key; only channel
-  operators may invite to a `+i` channel.
+- UnrealIRCd's user and channel modes, extended bans and `KNOCK`; see
+  [User and channel modes](#user-and-channel-modes).
+  Several changes are echoed as one MODE line; invalid keys, limits or
+  parameters get `696`.
+- New channels start with `+nt`; the first member receives `@` operator status
+  (owner `~` comes from services or an override operator). Operator status is
+  not automatically reassigned when the last operator leaves. An invitation lets
+  a user past `+i`, `+b` and `+l`, but not a key; halfops and above may invite to
+  a `+i` channel.
 - `PRIVMSG` and `NOTICE` to nicknames or channels, including comma-separated
   targets. NOTICE never produces automatic error replies. Messages are not
   echoed to the sender unless the sender is the direct target.
@@ -58,8 +60,6 @@ plus Anope), see [docker/README.md](docker/README.md).
   searches skip `+i` users who share no channel with you. `WHOIS` (including
   channels), `WHOWAS` (the last 1024 quits and nickname changes), `USERHOST`,
   `ISON`, `AWAY`, `VERSION`, `INFO`, and `TIME`.
-- User mode `+i` (invisible); `+w` is accepted without effect because WALLOPS
-  always reach every operator.
 - IPv6 hosts beginning with `:` are shown with a leading `0` (`0::1`) so replies parse.
 - Authenticated server links, state bursts, remote messaging and queries,
   deterministic nickname collision handling, auto-reconnect, and netsplit cleanup.
@@ -69,6 +69,111 @@ plus Anope), see [docker/README.md](docker/README.md).
 - RFC1459 case folding for names, CRLF output, LF-tolerant input, 512-byte wire
   limits, and UTF-8-safe output truncation. NAMES lists split across replies.
   Client-provided prefixes are ignored and replaced with session identity.
+
+## User and channel modes
+
+KeladiIRCd follows [UnrealIRCd 6's modes](https://www.unrealircd.org/docs/User_modes).
+`004` and `005` (`CHANMODES`, `PREFIX`, `EXCEPTS`, `INVEX`, `EXTBAN`, `KNOCK`,
+`BOT`) advertise them.
+
+**User modes.** A user sets these on itself with `MODE nick +modes`:
+
+| Mode | Meaning |
+| --- | --- |
+| `B` | Bot: WHOIS shows `335`, WHO shows `B` |
+| `d` | Deaf: receives no channel messages |
+| `D` | Receives no private messages, except from operators and services |
+| `G` | Bad words in messages to you become `<censored>` (`badwords` setting) |
+| `i` | Invisible to wildcard WHO from users who share no channel |
+| `p` | Hides your channels in WHOIS (from users other than operators) |
+| `R` | Private messages only from users logged in to services |
+| `T` | Receives no CTCPs (except ACTION) |
+| `w` | Receives WALLOPS; OPER sets it |
+| `x` | Cloaked host: keyed hashes of the address, such as `1A2B3C4D.5E6F7A8B.9C0D1E2F.IP` (`cloak_key_env` setting) |
+| `Z` | Talks privately only with TLS users; needs `z` |
+
+Operators may also set `H` (hide operator status), `I` (hide idle time), `q`
+(only services may kick you), `W` (notice when someone WHOISes you), and `s`
+with a server notice mask: `MODE nick +s +cFk`, or `+s` alone for `cFGkosv`.
+Mask letters: `c` local connects and exits, `F` remote ones, `G` K/G-lines, `k`
+kills, `n`/`N` local/remote nick changes, `o` OPER logins, `v` vhosts. Dropping
+`+o` drops these too. The server sets `o` (OPER), `r` (identified to services),
+`S` (service bots), `t` (a services vhost; `-t` gives it up) and `z` (connected
+through the TLS proxy listener). `modes_on_connect` gives every user modes on
+connecting, as UnrealIRCd's `modes-on-connect` does.
+
+**Member status**, highest first: `+q` owner `~`, `+a` admin `&`, `+o` operator
+`@`, `+h` halfop `%`, `+v` voice `+`. Only owners give `+q`/`+a`; operators give
+`+o`/`+h`; halfops give `+v`. No one removes a status higher than their own
+(anyone may drop their own), kicks someone of higher status, and halfops kick
+only voiced and regular users. Halfops may set `TOPIC` under `+t`, lists, and
+`cCGiKmMnNStTV`; the other modes need an operator.
+
+**Channel modes:**
+
+| Mode | Meaning |
+| --- | --- |
+| `b`, `e`, `I` | Bans, ban exceptions and invite exceptions (60 each; list with `MODE #c b`/`e`/`I`). Plain masks or extended bans |
+| `c` | No colours |
+| `C` | No CTCPs (except ACTION) |
+| `D` | Delayed join: joins show only to operators until the user speaks or gets a status. The server sets `d` while `-D` leaves users hidden |
+| `f` | Flood protection, see below |
+| `F` | Flood profile: `very-strict`, `strict`, `normal`, `relaxed`, `very-relaxed` (used when no `+f` is set) |
+| `G` | Bad words become `<censored>` |
+| `H lines:time` | History: up to 200 lines kept up to 7 days (time in minutes, or `30m`, `12h`, `1d`), played to users who join |
+| `i`, `k`, `l`, `m`, `n`, `s`, `t` | Invite only, key, limit, moderated, no external messages, secret, protected topic |
+| `j joins:seconds` | Each user may join at most this often |
+| `K` | No KNOCK |
+| `L #channel` | When `+l` is full, joiners go to this channel instead |
+| `M` | Only voiced or logged-in users may speak |
+| `N` | No nick changes (except halfops and above) |
+| `O` | Operators only (an operator sets it) |
+| `p` | Private: hidden from LIST and WHOIS for non-members |
+| `P` | Permanent: kept with no members (an operator sets it) |
+| `Q` | No kicks, except by override operators and services |
+| `r` | Registered (services only) |
+| `R` | Only users logged in to services may join |
+| `S` | Strip colours and formatting |
+| `T` | No channel NOTICEs (except operators) |
+| `V` | No INVITE |
+| `z` | Only TLS users may join; the server sets `Z` while every member uses TLS |
+
+Channel operators are exempt from `c`, `C`, `T` and text bans. Banned users
+without voice cannot speak or change nickname.
+
+**`+f`** takes `[<count><kind>#<action><minutes>,...]:<seconds>`, for example
+`+f [7c#C15,30j#R5,10k#K15,40m#M10,8n#N15,5t#b,3r]:15`. Kinds count per channel:
+`c` CTCPs, `j` joins, `k` knocks, `m` messages, `n` nick changes; or per user:
+`t` lines, `r` repeated lines. A kind over its count sets its action mode (`c`:
+`C`/`m`/`M`, `j`: `i`/`R`, `k`: `K`, `m`: `m`/`M`, `n`: `N`), which the server
+removes after the minutes if given; for `t` and `r` the action is a kick (`k`,
+the default) or a ban and kick (`b`). The short form `+f 5:10` (or `*5:10` to
+ban as well) limits lines per user. Halfops and above are exempt.
+
+**Extended bans** go in `+b`, `+e` and `+I`, by name or letter (`~a:` is stored
+as `~account:`):
+
+| Extban | Matches or does |
+| --- | --- |
+| `~account:name` (`~a`) | Logged-in account (wildcards; `0` means not logged in) |
+| `~channel:[prefix]#chan` (`~c`) | Members of a channel, optionally with at least a status (`~channel:@#ops`) |
+| `~operclass:class` (`~O`) | Operators of a class (`local`, `global`, `override`) |
+| `~realname:mask` (`~r`) | Real name; `_` matches a space |
+| `~securitygroup:group` (`~G`) | `known-users`, `unknown-users`, `tls-users`, `tls-and-known-users` |
+| `~quiet:mask` (`~q`) | May join but not speak |
+| `~nickchange:mask` (`~n`) | May not change nickname |
+| `~join:mask` (`~j`) | May not join, may speak |
+| `~forward:#chan:mask` (`~f`) | Banned joiners go to `#chan` instead |
+| `~partmsg:mask` (`~p`) | Part messages are hidden |
+| `~time:minutes:ban` (`~t`) | Removed after the minutes |
+| `~text:block:pattern` / `~text:censor:word` (`~T`) | Blocks matching messages, or censors a word |
+| `~msgbypass:what:mask` (`~m`, `+e` only) | Lets matching users past `external`, `moderated`, `censor`, `color`, `notice` or `ctcp` |
+
+`~quiet`, `~nickchange` and `~join` take a mask or one of the first five
+extbans; in `+e` they except only that restriction.
+
+`KNOCK #channel [:reason]` asks the operators of an invite-only channel for an
+invitation (`480` when the channel is not `+i`, is `+K`, or bans you).
 
 ## Limits and scope
 
@@ -88,9 +193,11 @@ and is discarded. Oversized lines receive `417` and are discarded.
 
 State is in memory and disappears on restart. This is not a complete UnrealIRCd
 implementation. Built-in services, SASL without Anope, SASL mechanisms other
-than PLAIN, native TLS (see [docs/TLS.md](docs/TLS.md)), other user modes, ban
-exceptions (`+e`), invite exceptions (`+I`), extended bans, WHOX, MONITOR,
-and other administrative commands are not implemented.
+than PLAIN, native TLS (see [docs/TLS.md](docs/TLS.md)), the extended bans
+`~certfp`, `~country`, `~asn` and `~inherit`, CHATHISTORY and `server-time` (+H
+replays plain lines), WHOX, MONITOR, and other administrative commands are not
+implemented. Halfop, admin and owner prefixes use `&`, which is also the local
+channel type, so a client may misread an admin's local channel in WHOIS.
 Unknown commands or modes receive the corresponding numeric errors. Message tags
 are not negotiated or relayed.
 
@@ -134,7 +241,8 @@ PING round trip takes 1.2 ms.
 The [link protocol](docs/LINK_PROTOCOL.md) is KeladiIRCd-specific, inspired by
 [UnrealIRCd's link configuration](https://www.unrealircd.org/docs/Link_block).
 It does **not** link directly to UnrealIRCd. Run one outgoing connection per edge
-of your network tree. Both peers need a configuration row and the same secret.
+of your network tree. Both peers need a `[[link]]` block for each other and the
+same secret.
 
 In each PowerShell terminal, set the secrets (replace these examples):
 
@@ -146,13 +254,13 @@ $env:KELADIIRCD_ADMIN_SECRET = 'replace-with-a-different-operator-secret'
 Run server A:
 
 ```powershell
-.\target\release\keladiircd.exe --name a.local --listen 127.0.0.1:6667 --link-listen 127.0.0.1:7001 --config examples/a.conf
+.\target\release\keladiircd.exe --config examples/a.toml
 ```
 
 Run server B in another terminal:
 
 ```powershell
-.\target\release\keladiircd.exe --name b.local --listen 127.0.0.1:6668 --link-listen 127.0.0.1:7002 --config examples/b.conf
+.\target\release\keladiircd.exe --config examples/b.toml
 ```
 
 Clients on either server can join the same `#general` and chat. `&local` channels
@@ -162,30 +270,85 @@ stunnel for links). Link handshakes prove the shared secret
 with HMAC-SHA256 challenge-response, so the secret itself is never sent, but the
 traffic that follows is readable. Link peers are fully trusted.
 
-Configuration files contain one row per account or peer:
+[`examples/a.toml`](examples/a.toml) and [`examples/b.toml`](examples/b.toml)
+hold each server's name, listeners, link and operator; see
+[Configuration](#configuration) for every key.
 
-```text
-oper NAME IP_MASK CLASS PASSWORD_ENV
-link SERVER OUTGOING_ADDRESS_OR_- INCOMING_IP PASSWORD_ENV
-services SERVER INCOMING_IP PASSWORD_ENV
-sasl ANOPE_HTTPD_ADDRESS JSONRPC_PATH TOKEN_ENV
+## Configuration
+
+`--config FILE` reads a [TOML](https://toml.io) file.
+[`examples/keladiircd.toml`](examples/keladiircd.toml) explains every key with its
+default value and ends with short examples: a single server, two linked servers,
+Anope services, a TLS proxy and operators. In short:
+
+```toml
+name = "a.local"                 # also: description, listen, link_listen,
+link_listen = "127.0.0.1:7001"   #       proxy_listen, max_users
+
+[[link]]                         # one block per linked server
+name = "b.local"
+connect = "127.0.0.1:7002"       # leave out to only accept the link
+incoming_ip = "127.0.0.1"
+password_env = "KELADIIRCD_NET_SECRET"
+
+[[oper]]                         # one block per /OPER login
+name = "admin"
+ip_mask = "127.0.0.1"            # * and ? wildcards over the client IP
+class = "override"               # local, global or override
+password_env = "KELADIIRCD_ADMIN_SECRET"
+
+[[services]]                     # Anope, see Linking IRC services
+name = "services.local"
+incoming_ip = "127.0.0.1"
+password_env = "KELADIIRCD_SERVICES_SECRET"
+
+[sasl]                           # SASL PLAIN checked by Anope
+address = "127.0.0.1:8080"
+path = "/jsonrpc"                # the default
+token_env = "KELADIIRCD_ANOPE_RPC_TOKEN"
 ```
 
-`IP_MASK` accepts `*` and `?` over textual client IPs. `INCOMING_IP` is an exact
-IP address. Outgoing addresses are numeric `IP:port` socket addresses (bracket
-IPv6 addresses). `-` means incoming only. Secret fields name environment variables,
-not literal passwords. Missing variables or invalid rows stop startup. Operator
-names and passwords are case sensitive. Configuration is read at startup.
+`incoming_ip` is an exact IP address. `connect` is a numeric `IP:port` address
+(bracket IPv6 addresses). Keys ending in `_env` name environment variables, not
+literal passwords. Missing variables, unknown keys and invalid values stop startup
+with an error naming the line. Operator names and passwords are case sensitive.
+Command-line flags override the file. Configuration is read at startup.
+
+### Upgrading from the line-based config
+
+Earlier versions read one row per entry. KeladiIRCd now refuses those files with
+an error pointing here. Rewrite each row as a block (and, if you like, move
+`--name`, `--listen` and the other flags into the file):
+
+| Old row | New block |
+| --- | --- |
+| `link NAME ADDRESS INCOMING_IP ENV` | `[[link]]` with `name`, `connect = "ADDRESS"`, `incoming_ip`, `password_env = "ENV"` |
+| `link NAME - INCOMING_IP ENV` | the same without `connect` |
+| `oper NAME IP_MASK CLASS ENV` | `[[oper]]` with `name`, `ip_mask`, `class`, `password_env` |
+| `services NAME INCOMING_IP ENV` | `[[services]]` with `name`, `incoming_ip`, `password_env` |
+| `sasl ADDRESS PATH ENV` | `[sasl]` with `address`, `path`, `token_env` |
+
+Every value is quoted. For example, `link b.local - 127.0.0.1 NET_SECRET` becomes
+
+```toml
+[[link]]
+name = "b.local"
+incoming_ip = "127.0.0.1"
+password_env = "NET_SECRET"
+```
 
 ## Linking IRC services (Anope)
 
 Services such as [Anope](https://www.anope.org/) link to the `--link-listen` port
 using the ngIRCd server protocol (RFC 2813 plus ngIRCd's extensions), which Anope
-supports with its `ngircd` protocol module. Add a `services` row naming the
+supports with its `ngircd` protocol module. Add a `[[services]]` block naming the
 services server, the IP it connects from, and the secret variable:
 
-```text
-services services.example.net 127.0.0.1 KELADIIRCD_SERVICES_SECRET
+```toml
+[[services]]
+name = "services.example.net"
+incoming_ip = "127.0.0.1"
+password_env = "KELADIIRCD_SERVICES_SECRET"
 ```
 
 In Anope's `services.conf`, set `serverinfo` `name` to the same server name, point
@@ -197,15 +360,18 @@ Anope's ngIRCd module has no SASL, so KeladiIRCd checks SASL PLAIN logins itself
 through Anope's JSON-RPC interface (`anope.checkCredentials`), then tells
 services the user's account as usual. In Anope's `modules.conf`, load `httpd`
 (keep it on loopback or a private network), `jsonrpc` with a token allowed the
-`anope.checkCredentials` method, and `rpc_user`; then add a row with Anope's httpd
-address, the page (`/jsonrpc`), and a variable holding the same token:
+`anope.checkCredentials` method, and `rpc_user`; then add a `[sasl]` section with
+Anope's httpd address and a variable holding the same token (`path` defaults to
+`/jsonrpc`):
 
-```text
-sasl 127.0.0.1:8080 /jsonrpc KELADIIRCD_ANOPE_RPC_TOKEN
+```toml
+[sasl]
+address = "127.0.0.1:8080"
+token_env = "KELADIIRCD_ANOPE_RPC_TOKEN"
 ```
 
 Tested with Anope 2.1.27 (`tools/anope`): nickname registration, IDENTIFY and
-LOGOUT, `+R` and the account shown in WHOIS (`330`, `307`, `900`/`901`), SASL
+LOGOUT, `+r` (ngIRCd's `+R`) and the account shown in WHOIS (`330`, `307`, `900`/`901`), SASL
 PLAIN, ChanServ channel registration (`+r`) and modes, HostServ vhosts (`396`;
 operators and the user themself see the real host in WHOIS `378`), NickServ
 RECOVER (KILL and SVSNICK), service bots in channels, kicks and mode changes
@@ -224,7 +390,7 @@ Following [UnrealIRCd's operator model](https://www.unrealircd.org/docs/Oper_blo
 
 | Class | Privileges |
 | --- | --- |
-| `local` | KILL local users, send WALLOPS to network operators |
+| `local` | KILL local users, send WALLOPS (to users with `+w`) |
 | `global` | Also KILL remote users, SQUIT direct links, enable configured links with CONNECT, set KLINE and GLINE |
 | `override` | Also bypass channel MODE/TOPIC/KICK permission checks and use SAJOIN, SAPART, SAMODE |
 
@@ -247,7 +413,7 @@ Example client commands on server A:
 /MODE your-nickname -o
 ```
 
-Successful OPER sends numeric `381` and MODE `+o`; WHOIS shows numeric `313`.
+Successful OPER sends numeric `381` and MODE `+ow`; WHOIS shows numeric `313`.
 `KLINE` bans users from one server and `GLINE` from the whole network:
 `<mask> <seconds> :<reason>` adds a ban (0 seconds is permanent) and `<mask>`
 alone removes it. Masks are `user@host`, `nick!user@host` or a host; matching

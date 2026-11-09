@@ -24,12 +24,14 @@ const MAX_WHOWAS: usize = 1024;
 const CAPABILITIES: &str = "multi-prefix userhost-in-names";
 mod bans;
 mod channel;
+mod config;
 mod crypto;
+mod modes;
 mod network;
 mod oper;
 mod sasl;
 mod services;
-use channel::{status_prefix, Channel};
+use channel::{status_prefix, Channel, Check};
 #[doc(hidden)]
 pub use crypto::link_proof;
 pub use network::LinkConfig;
@@ -56,6 +58,13 @@ pub struct Config {
     pub max_users: usize,
     /// SASL logins checked against Anope's JSON-RPC interface.
     pub sasl: Option<SaslConfig>,
+    /// Secret for cloaked hosts (+x); the same on every server keeps cloaks, and bans
+    /// on them, network-wide. None picks a random key at startup.
+    pub cloak_key: Option<String>,
+    /// User modes every client gets on connecting, such as `+ixw`.
+    pub modes_on_connect: String,
+    /// Lower-case words (`*`/`?` wildcards) that +G replaces with `<censored>`.
+    pub badwords: Vec<String>,
 }
 
 impl Default for Config {
@@ -72,6 +81,9 @@ impl Default for Config {
             services: Vec::new(),
             max_users: DEFAULT_MAX_USERS,
             sasl: None,
+            cloak_key: None,
+            modes_on_connect: String::new(),
+            badwords: Vec::new(),
         }
     }
 }
@@ -114,6 +126,30 @@ impl Config {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "Invalid sasl configuration",
+            ));
+        }
+        if !self
+            .modes_on_connect
+            .chars()
+            .all(|c| c == '+' || modes::USER_SETTABLE.contains(c))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "modes_on_connect may hold only + and {}",
+                    modes::USER_SETTABLE
+                ),
+            ));
+        }
+        if self.badwords.len() > 500
+            || self
+                .badwords
+                .iter()
+                .any(|w| w.is_empty() || w.len() > 50 || *w != w.to_lowercase())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "badwords must be at most 500 lower-case words of 1-50 bytes",
             ));
         }
         network::validate_config(self)?;
@@ -237,9 +273,13 @@ struct Client {
     /// Wrong passwords and OPER attempts on this connection.
     auth_failures: u8,
     away: String,
-    invisible: bool,
-    /// User mode +R: identified to services for the current nickname.
-    identified: bool,
+    /// User modes other than o (the operator class) and t (the vhost); `r` means
+    /// identified to services for the current nickname.
+    umodes: BTreeSet<char>,
+    /// Server notice letters for +s (local operators only).
+    snomask: String,
+    /// The cloaked host (+x); empty for services' users.
+    masked_host: String,
     /// Services account name; empty when logged out.
     account: String,
     /// The hidden stand-in for a services server, used as the source of its commands.
@@ -286,8 +326,9 @@ impl Client {
             rejected_password: None,
             auth_failures: 0,
             away: String::new(),
-            invisible: false,
-            identified: false,
+            umodes: BTreeSet::new(),
+            snomask: String::new(),
+            masked_host: String::new(),
             account: String::new(),
             server: false,
             multi_prefix: false,
@@ -311,26 +352,36 @@ impl Client {
         format!("{}!~{}@{}", self.nick, self.user, self.shown())
     }
 
-    /// The host others see: the services-set vhost, or the real one.
+    /// The host others see: the services-set vhost, the cloak (+x), or the real one.
     fn shown(&self) -> String {
-        if self.cloak.is_empty() {
-            shown_host(&self.host)
-        } else {
+        if !self.cloak.is_empty() {
             shown_host(&self.cloak)
+        } else if self.umodes.contains(&'x') && !self.masked_host.is_empty() {
+            self.masked_host.clone()
+        } else {
+            shown_host(&self.host)
         }
     }
 
-    /// User modes as letters, e.g. `iRo`.
+    /// User modes as letters, e.g. `iorx`.
     fn modes(&self) -> String {
-        [
-            ('i', self.invisible),
-            ('o', self.oper.is_some()),
-            ('R', self.identified),
-        ]
-        .iter()
-        .filter(|(_, on)| *on)
-        .map(|(c, _)| *c)
-        .collect()
+        let mut modes = self.umodes.clone();
+        if self.oper.is_some() {
+            modes.insert('o');
+        }
+        if !self.cloak.is_empty() {
+            modes.insert('t');
+        }
+        modes.into_iter().collect()
+    }
+
+    fn has(&self, mode: char) -> bool {
+        self.umodes.contains(&mode)
+    }
+
+    /// Logged in to services (or identified for the nickname), for +R, +M and extbans.
+    fn known(&self) -> bool {
+        !self.account.is_empty() || self.has('r')
     }
 }
 
@@ -376,12 +427,20 @@ struct Server {
     server_bans: Vec<bans::ServerBan>,
     /// This server's own handle, for threads that report back (SASL checks).
     weak: Weak<Mutex<Server>>,
+    /// +f/+F counters by channel.
+    floods: BTreeMap<String, modes::Flood>,
+    /// +H lines by channel: Unix time and the line as sent.
+    history: BTreeMap<String, VecDeque<(u64, String)>>,
+    /// +j: when each local user started joining a channel, and how often since.
+    joins: BTreeMap<(String, u64), (Instant, u32)>,
+    /// Modes this server takes off later.
+    timed: Vec<modes::Timed>,
+    cloak_key: Vec<u8>,
 }
 
 impl Server {
     fn new(config: Config) -> Self {
         Self {
-            config,
             clients: BTreeMap::new(),
             channels: BTreeMap::new(),
             next_id: 0,
@@ -399,6 +458,18 @@ impl Server {
             whowas: VecDeque::new(),
             server_bans: Vec::new(),
             weak: Weak::new(),
+            floods: BTreeMap::new(),
+            history: BTreeMap::new(),
+            joins: BTreeMap::new(),
+            timed: Vec::new(),
+            // shortcut: without cloak_key_env, cloaks change at every restart and differ
+            // between servers; configure the same key everywhere to keep them stable.
+            cloak_key: config
+                .cloak_key
+                .clone()
+                .unwrap_or_else(crypto::nonce)
+                .into_bytes(),
+            config,
         }
     }
 
@@ -489,11 +560,12 @@ impl Server {
         }
     }
 
+    /// Users who see `id` in a shared channel (and so its nick changes and quits).
     fn peers(&self, id: u64) -> BTreeSet<u64> {
         self.channels
             .values()
             .filter(|c| c.members.contains_key(&id))
-            .flat_map(|c| c.members.keys().copied())
+            .flat_map(|c| c.audience(id))
             .collect()
     }
 
@@ -532,7 +604,10 @@ impl Server {
         if self.reject_banned(id) {
             return;
         }
-        self.clients.get_mut(&id).unwrap().registered = true;
+        let c = self.clients.get_mut(&id).unwrap();
+        c.registered = true;
+        c.umodes
+            .extend(self.config.modes_on_connect.chars().filter(|m| *m != '+'));
         self.note_peak();
         self.numeric(
             id,
@@ -552,21 +627,58 @@ impl Server {
             id,
             4,
             &format!(
-                "{} keladiircd-0.1.0 ioR biklmnorstv bklov",
-                self.config.name
+                "{} keladiircd-0.1.0 {} {} beIkloveqahLfFHj",
+                self.config.name,
+                modes::USER_MODES,
+                modes::CHAN_MODES
             ),
         );
-        self.numeric(id, 5, &format!("CASEMAPPING=rfc1459 CHANTYPES=#& CHANMODES=b,k,l,imnrst PREFIX=(ov)@+ MAXLIST=b:{} NICKLEN=30 CHANNELLEN=50 USERLEN=12 TOPICLEN=300 CHANLIMIT=#&:20 NETWORK=KeladiIRC UTF8ONLY :are supported by this server", channel::MAX_BANS));
+        self.numeric(
+            id,
+            5,
+            &format!(
+                "CASEMAPPING=rfc1459 CHANTYPES=#& CHANMODES=beI,k,fFHjLl,{} PREFIX=(qaohv)~&@%+                  EXCEPTS=e INVEX=I EXTBAN=~,{} MAXLIST=beI:{} :are supported by this server",
+                modes::CHAN_FLAGS,
+                modes::EXTBAN_LETTERS,
+                channel::MAX_BANS
+            ),
+        );
+        self.numeric(id, 5, "NICKLEN=30 CHANNELLEN=50 USERLEN=12 TOPICLEN=300 CHANLIMIT=#&:20 NETWORK=KeladiIRC KNOCK BOT=B UTF8ONLY :are supported by this server");
         self.lusers(id);
         self.motd(id);
+        let c = &self.clients[&id];
+        let modes = c.modes();
+        if !modes.is_empty() {
+            self.send(id, &format!(":{} MODE {} :+{modes}", c.prefix(), c.nick));
+        }
+        let text = format!(
+            "Client connecting: {} (~{}@{}) [{}]",
+            c.nick,
+            c.user,
+            c.shown(),
+            shown_host(&c.host)
+        );
+        self.sno('c', &text);
         self.net_flood(None, &self.user_record(id));
+    }
+
+    /// Sends a server notice to local operators whose +s mask includes `letter`.
+    fn sno(&self, letter: char, text: &str) {
+        for (&id, c) in &self.clients {
+            if c.route.is_none() && c.has('s') && c.snomask.contains(letter) {
+                self.send(
+                    id,
+                    &format!(":{} NOTICE {} :*** {text}", self.config.name, c.nick),
+                );
+            }
+        }
     }
 
     fn lusers(&self, id: u64) {
         let (local, count) = self.user_counts();
         let registered = || self.clients.values().filter(|c| c.registered);
         let opers = registered().filter(|c| c.oper.is_some()).count();
-        let invisible = registered().filter(|c| c.invisible).count();
+        let invisible = registered().filter(|c| c.has('i')).count();
         self.numeric(
             id,
             251,
@@ -644,16 +756,30 @@ impl Server {
             return;
         };
         let me = &self.clients[&id];
-        let names = ch.members.iter().map(|(member, &status)| {
-            let c = &self.clients[member];
-            let prefix = status_prefix(status, me.multi_prefix);
-            if me.userhost_names {
-                format!("{prefix}{}", c.prefix())
-            } else {
-                format!("{prefix}{}", c.nick)
-            }
-        });
-        let symbol = if ch.secret { '@' } else { '=' };
+        // Delayed-join (+D) members are listed only to themselves and operators.
+        let sees_hidden = ch.rank(id) >= 3;
+        let names = ch
+            .members
+            .iter()
+            .filter(|(member, status)| {
+                *status & channel::HIDDEN == 0 || sees_hidden || **member == id
+            })
+            .map(|(member, &status)| {
+                let c = &self.clients[member];
+                let prefix = status_prefix(status, me.multi_prefix);
+                if me.userhost_names {
+                    format!("{prefix}{}", c.prefix())
+                } else {
+                    format!("{prefix}{}", c.nick)
+                }
+            });
+        let symbol = if ch.has('s') {
+            '@'
+        } else if ch.has('p') {
+            '*'
+        } else {
+            '='
+        };
         self.numeric_list(id, 353, &format!("{symbol} {}", ch.name), names);
     }
 
@@ -681,11 +807,25 @@ impl Server {
             self.numeric(id, 442, &format!("{name} :You're not on that channel"));
             return;
         }
+        // A ~partmsg ban, or colours in a +c channel, drop the reason; +S cleans it.
+        let hide = !self.privileged(id)
+            && (self.hides_part(ch, id) || (ch.has('c') && modes::has_color(reason)));
+        let reason = if ch.has('S') {
+            modes::strip_formatting(reason)
+        } else {
+            reason.to_string()
+        };
+        let tail = if hide {
+            String::new()
+        } else {
+            format!(" :{reason}")
+        };
         self.broadcast(
-            ch.members.keys().copied(),
-            &format!(":{} PART {} :{reason}", self.clients[&id].prefix(), ch.name),
+            ch.audience(id),
+            &format!(":{} PART {}{tail}", self.clients[&id].prefix(), ch.name),
         );
         self.remove_member(id, &key);
+        self.auto_modes(&key);
     }
 
     /// Counts a wrong password or OPER attempt; too many close the connection.
@@ -708,6 +848,10 @@ impl Server {
                 &format!(":{} NICK :{nick}", self.clients[&id].prefix()),
             );
             self.remember_whowas(id);
+            if self.clients[&id].route.is_none() {
+                let old = &self.clients[&id].nick;
+                self.sno('n', &format!("Client nick change: {old} -> {nick}"));
+            }
         }
         self.clients.get_mut(&id).unwrap().nick = nick.into();
     }
@@ -726,11 +870,15 @@ impl Server {
         );
     }
 
+    /// Removes a member; a channel ends with its last member unless it is +P.
     fn remove_member(&mut self, id: u64, key: &str) {
         if let Some(ch) = self.channels.get_mut(key) {
             ch.members.remove(&id);
-            if ch.members.is_empty() {
+            if ch.members.is_empty() && !ch.has('P') {
                 self.channels.remove(key);
+                self.forget_channel(key);
+            } else if let Some(flood) = self.floods.get_mut(key) {
+                flood.forget(id);
             }
         }
     }
@@ -749,16 +897,31 @@ impl Server {
                     None,
                     &format!("REMOVE {} {}", c.uid, network::encode(reason)),
                 );
+                let text = format!(
+                    "Client exiting: {} (~{}@{}) [{reason}]",
+                    c.nick,
+                    c.user,
+                    c.shown()
+                );
+                self.sno('c', &text);
             }
         }
+        let c = &self.clients[&id];
         if c.registered && c.route.is_none() {
             let uid = c.uid.clone();
             self.remember_deleted(&uid);
         }
-        let keys: Vec<_> = self.channels.keys().cloned().collect();
+        let keys: Vec<_> = self
+            .channels
+            .iter()
+            .filter(|(_, ch)| ch.members.contains_key(&id))
+            .map(|(key, _)| key.clone())
+            .collect();
         for key in keys {
             self.remove_member(id, &key);
+            self.auto_modes(&key);
         }
+        self.joins.retain(|(_, user), _| *user != id);
         if let Some(c) = self.clients.remove(&id) {
             self.member_versions.retain(|(_, uid), _| uid != &c.uid);
         }
@@ -851,6 +1014,7 @@ impl Server {
         let required = match command {
             "NICK" | "PASS" | "PING" | "CAP" | "JOIN" | "PART" | "TOPIC" | "MODE" | "WHOIS" => 1,
             "KICK" | "INVITE" | "OPER" | "SAJOIN" | "SAPART" | "SAMODE" => 2,
+            "KNOCK" => 1,
             "WALLOPS" | "SQUIT" | "CONNECT" | "USERHOST" | "ISON" | "KILL" | "WHOWAS" => 1,
             "KLINE" | "GLINE" | "AUTHENTICATE" => 1,
             "USER" => 4,
@@ -961,8 +1125,19 @@ impl Server {
                     // An exact no-op change is silent; a case-only change still announces.
                 } else if self.find_nick(&p[0]).is_some_and(|other| other != id) {
                     self.numeric(id, 433, &format!("{} :Nickname is already in use", p[0]));
+                } else if let Some((code, text)) = self.nick_blocked(id) {
+                    self.numeric(id, code, &text);
                 } else {
                     self.change_nick(id, &p[0]);
+                    let keys: Vec<_> = self
+                        .channels
+                        .iter()
+                        .filter(|(_, ch)| ch.members.contains_key(&id))
+                        .map(|(key, _)| key.clone())
+                        .collect();
+                    for key in keys {
+                        self.flood_event(&key, 'n', id, "");
+                    }
                 }
             }
             "USER" => {
@@ -1049,7 +1224,7 @@ impl Server {
                         self.numeric(id, 442, &format!("{} :You're not on that channel", p[0]));
                     } else if p.len() == 1 {
                         self.topic_reply(id, &key);
-                    } else if ch.protected_topic && !ch.is_op(id) && !self.privileged(id) {
+                    } else if ch.has('t') && ch.rank(id) < 2 && !self.privileged(id) {
                         self.numeric(
                             id,
                             482,
@@ -1092,6 +1267,7 @@ impl Server {
             }
             "MODE" => self.mode(id, &p),
             "KICK" => self.kick(id, &p),
+            "KNOCK" => self.knock(id, &p),
             "INVITE" => self.invite(id, &p),
             "WHOIS" => {
                 for nick in p.last().unwrap().split(',') {
@@ -1100,13 +1276,15 @@ impl Server {
                         .filter(|other| self.clients[other].registered)
                     {
                         let c = &self.clients[&other];
+                        let me = &self.clients[&id];
+                        // Opers and the user see what +p, +H, +I and cloaks hide.
+                        let insider = other == id || me.oper.is_some();
                         self.numeric(
                             id,
                             311,
                             &format!("{} ~{} {} * :{}", c.nick, c.user, c.shown(), c.real),
                         );
-                        if !c.cloak.is_empty() && (other == id || self.clients[&id].oper.is_some())
-                        {
+                        if c.shown() != shown_host(&c.host) && insider {
                             let real = shown_host(&c.host);
                             self.numeric(
                                 id,
@@ -1114,14 +1292,15 @@ impl Server {
                                 &format!("{} :is connecting from *@{real} {real}", c.nick),
                             );
                         }
-                        let multi = self.clients[&id].multi_prefix;
+                        let multi = me.multi_prefix;
                         let channels = self
                             .channels
                             .values()
-                            .filter(|ch| self.visible(ch, id))
+                            .filter(|ch| self.visible(ch, id) && (!c.has('p') || insider))
                             .filter_map(|ch| {
                                 let status = *ch.members.get(&other)?;
-                                Some(format!("{}{}", status_prefix(status, multi), ch.name))
+                                (status & channel::HIDDEN == 0 || other == id)
+                                    .then(|| format!("{}{}", status_prefix(status, multi), ch.name))
                             });
                         self.numeric_list(id, 319, &c.nick, channels);
                         self.numeric(
@@ -1129,10 +1308,18 @@ impl Server {
                             312,
                             &format!("{} {} :{}", c.nick, c.home, self.server_info(&c.home)),
                         );
-                        if c.oper.is_some() {
-                            self.numeric(id, 313, &format!("{} :is an IRC operator", c.nick));
+                        if (c.oper.is_some() || c.has('S')) && (!c.has('H') || insider) {
+                            let what = if c.has('S') {
+                                "is a Network Service"
+                            } else {
+                                "is an IRC operator"
+                            };
+                            self.numeric(id, 313, &format!("{} :{what}", c.nick));
                         }
-                        if c.identified {
+                        if c.has('B') {
+                            self.numeric(id, 335, &format!("{} :is a Bot on KeladiIRC", c.nick));
+                        }
+                        if c.has('r') {
                             self.numeric(
                                 id,
                                 307,
@@ -1146,19 +1333,47 @@ impl Server {
                                 &format!("{} {} :is logged in as", c.nick, c.account),
                             );
                         }
+                        if c.has('z') {
+                            self.numeric(
+                                id,
+                                671,
+                                &format!("{} :is using a secure connection", c.nick),
+                            );
+                        }
+                        if insider {
+                            self.numeric(
+                                id,
+                                379,
+                                &format!("{} :is using modes +{}", c.nick, c.modes()),
+                            );
+                        }
                         if !c.away.is_empty() {
                             self.numeric(id, 301, &format!("{} :{}", c.nick, c.away));
                         }
-                        self.numeric(
-                            id,
-                            317,
-                            &format!(
-                                "{} {} {} :seconds idle, signon time",
+                        if !c.has('I') || insider {
+                            self.numeric(
+                                id,
+                                317,
+                                &format!(
+                                    "{} {} {} :seconds idle, signon time",
+                                    c.nick,
+                                    c.active.elapsed().as_secs(),
+                                    timestamp().saturating_sub(c.connected.elapsed().as_secs())
+                                ),
+                            );
+                        }
+                        // +W: operators hear who looks them up.
+                        if c.has('W') && other != id {
+                            let notice = format!(
+                                ":{} NOTICE {} :*** {} (~{}@{}) did a /whois on you",
+                                self.config.name,
                                 c.nick,
-                                c.active.elapsed().as_secs(),
-                                timestamp().saturating_sub(c.connected.elapsed().as_secs())
-                            ),
-                        );
+                                me.nick,
+                                me.user,
+                                me.shown()
+                            );
+                            self.send(other, &notice);
+                        }
                     } else {
                         self.numeric(id, 401, &format!("{nick} :No such nick"));
                     }
@@ -1173,8 +1388,11 @@ impl Server {
                         .get(&fold(mask))
                         .filter(|ch| self.visible(ch, id))
                     {
+                        let sees_hidden = ch.rank(id) >= 3;
                         for (&other, &status) in &ch.members {
-                            self.who_reply(id, other, &ch.name, status);
+                            if status & channel::HIDDEN == 0 || sees_hidden || other == id {
+                                self.who_reply(id, other, &ch.name, status);
+                            }
                         }
                     }
                 } else {
@@ -1185,7 +1403,7 @@ impl Server {
                         // Invisible users are found only by exact nickname or a shared channel.
                         if c.registered
                             && (all || oper::matches(&fold(mask), &fold(&c.nick)))
-                            && (!wildcard || !c.invisible || other == id || shared.contains(&other))
+                            && (!wildcard || !c.has('i') || other == id || shared.contains(&other))
                         {
                             self.who_reply(id, other, "*", 0);
                         }
@@ -1271,7 +1489,7 @@ impl Server {
                         format!(
                             "{}{}={}~{}@{}",
                             c.nick,
-                            if c.oper.is_some() { "*" } else { "" },
+                            if self.shows_oper(id, other) { "*" } else { "" },
                             if c.away.is_empty() { '+' } else { '-' },
                             c.user,
                             c.shown()
@@ -1302,26 +1520,63 @@ impl Server {
         }
     }
 
+    /// Whether `id` sees `other` as an operator: +H hides it from non-operators.
+    fn shows_oper(&self, id: u64, other: u64) -> bool {
+        let c = &self.clients[&other];
+        c.oper.is_some() && (!c.has('H') || self.clients[&id].oper.is_some())
+    }
+
     fn who_reply(&self, id: u64, other: u64, channel: &str, status: u8) {
         let c = &self.clients[&other];
         self.numeric(
             id,
             352,
             &format!(
-                "{channel} ~{} {} {} {} {}{}{} :0 {}",
+                "{channel} ~{} {} {} {} {}{}{}{} :0 {}",
                 c.user,
                 c.shown(),
                 c.home,
                 c.nick,
                 if c.away.is_empty() { "H" } else { "G" },
-                if c.oper.is_some() { "*" } else { "" },
+                if self.shows_oper(id, other) { "*" } else { "" },
+                if c.has('B') { "B" } else { "" },
                 status_prefix(status, self.clients[&id].multi_prefix),
                 c.real
             ),
         );
     }
 
-    fn message(&self, id: u64, command: &str, p: &[String]) {
+    /// Why `id` may not change nickname now: +N, or a ban (including ~nickchange)
+    /// in a channel where it has no voice.
+    fn nick_blocked(&self, id: u64) -> Option<(u16, String)> {
+        if !self.clients[&id].registered || self.privileged(id) {
+            return None;
+        }
+        self.channels
+            .values()
+            .filter(|ch| ch.members.contains_key(&id))
+            .find_map(|ch| {
+                let rank = ch.rank(id);
+                if ch.has('N') && rank < 2 {
+                    Some((
+                        447,
+                        format!(":Can not change nickname while on {} (+N)", ch.name),
+                    ))
+                } else if rank == 0 && self.banned(ch, id, Check::Nick) {
+                    Some((
+                        437,
+                        format!(
+                            "{} :Cannot change nickname while banned on channel",
+                            ch.name
+                        ),
+                    ))
+                } else {
+                    None
+                }
+            })
+    }
+
+    fn message(&mut self, id: u64, command: &str, p: &[String]) {
         let notice = command == "NOTICE";
         if p.is_empty() || p[0].is_empty() {
             if !notice {
@@ -1335,150 +1590,271 @@ impl Server {
             }
             return;
         }
+        // Speaking can change channels (a +D member is revealed, +f acts); those
+        // changes are replicated at the end. Most messages change nothing.
+        let mut before = None;
         let mut seen = BTreeSet::new();
         for target in p[0].split(',') {
             if !seen.insert(fold(target)) {
                 continue;
             }
-            let line = format!(
-                ":{} {command} {target} :{}",
-                self.clients[&id].prefix(),
-                p[1]
-            );
             if target.starts_with(['#', '&']) {
-                if let Some(ch) = self.channels.get(&fold(target)) {
-                    let status = ch.members.get(&id);
-                    // +n blocks non-members; +m blocks everyone without voice or op.
-                    // Services may always speak.
-                    if !self.privileged(id)
-                        && ((ch.no_external && status.is_none())
-                            || (ch.moderated && status.is_none_or(|s| *s == 0)))
-                    {
+                let key = fold(target);
+                let Some(ch) = self.channels.get(&key) else {
+                    if !notice {
+                        self.numeric(id, 403, &format!("{target} :No such channel"));
+                    }
+                    continue;
+                };
+                let text = match self.channel_text(id, ch, notice, &p[1]) {
+                    Ok(text) => text,
+                    Err(why) => {
                         if !notice {
-                            self.numeric(id, 404, &format!("{target} :Cannot send to channel"));
+                            let text = format!("{target} :Cannot send to channel ({why})");
+                            self.numeric(id, 404, &text);
                         }
+                        continue;
+                    }
+                };
+                let hidden = ch
+                    .members
+                    .get(&id)
+                    .is_some_and(|s| s & channel::HIDDEN != 0);
+                if hidden || ch.flood_spec().is_some() {
+                    before.get_or_insert_with(|| self.channels.clone());
+                }
+                let kind = if modes::is_ctcp(&text) { 'c' } else { 'm' };
+                if ['t', 'r', kind]
+                    .iter()
+                    .any(|k| self.flood_event(&key, *k, id, &text))
+                {
+                    continue;
+                }
+                self.reveal(&key, id);
+                let Some(ch) = self.channels.get(&key) else {
+                    continue;
+                };
+                let line = format!(":{} {command} {target} :{text}", self.clients[&id].prefix());
+                for &member in ch.members.keys().filter(|m| **m != id) {
+                    let m = &self.clients[&member];
+                    // +d (deaf) users get no channel messages; +G censors what they get.
+                    if m.has('d') {
+                        continue;
+                    }
+                    if m.has('G') {
+                        let text = modes::censor(&text, &self.config.badwords);
+                        let prefix = self.clients[&id].prefix();
+                        self.send(member, &format!(":{prefix} {command} {target} :{text}"));
                     } else {
-                        self.broadcast(
-                            ch.members.keys().copied().filter(|other| *other != id),
-                            &line,
+                        self.send(member, &line);
+                    }
+                }
+                if ch.params.contains_key(&'H') {
+                    let (name, at) = (ch.name.clone(), timestamp());
+                    if name.starts_with('#') {
+                        self.net_flood(
+                            None,
+                            &format!(
+                                "HISTORY {} {at} {}",
+                                network::encode(&name),
+                                network::encode(&line)
+                            ),
                         );
                     }
-                } else if !notice {
-                    self.numeric(id, 403, &format!("{target} :No such channel"));
+                    self.remember(&key, at, line);
                 }
             } else if let Some(other) = self
                 .find_nick(target)
                 .filter(|other| self.clients[other].registered)
             {
-                self.send(other, &line);
-                if !notice && !self.clients[&other].away.is_empty() {
-                    self.numeric(id, 301, &format!("{target} :{}", self.clients[&other].away));
+                let (me, them) = (&self.clients[&id], &self.clients[&other]);
+                // Operators and services may always reach a user.
+                let exempt = self.privileged(id) || me.oper.is_some();
+                let refusal = if exempt {
+                    None
+                } else if them.has('D') {
+                    Some((531, "does not accept private messages (+D)"))
+                } else if them.has('R') && !me.known() {
+                    Some((
+                        486,
+                        "accepts private messages only from registered users (+R)",
+                    ))
+                } else if them.has('T') && modes::is_ctcp(&p[1]) {
+                    Some((531, "does not accept CTCPs (+T)"))
+                } else if them.has('Z') && !me.has('z') {
+                    Some((531, "accepts private messages only over TLS (+Z)"))
+                } else if me.has('Z') && !them.has('z') && !self.is_service(other) {
+                    Some((531, "is not using TLS, and you are +Z"))
+                } else {
+                    None
+                };
+                if let Some((code, why)) = refusal {
+                    if !notice {
+                        self.numeric(id, code, &format!("{} :{} {why}", them.nick, them.nick));
+                    }
+                    continue;
+                }
+                let text = if them.has('G') {
+                    modes::censor(&p[1], &self.config.badwords)
+                } else {
+                    p[1].clone()
+                };
+                self.send(
+                    other,
+                    &format!(":{} {command} {target} :{text}", me.prefix()),
+                );
+                if !notice && !them.away.is_empty() {
+                    self.numeric(id, 301, &format!("{target} :{}", them.away));
                 }
             } else if !notice {
                 self.numeric(id, 401, &format!("{target} :No such nick"));
             }
         }
+        if let Some(before) = before {
+            self.sync_channels(&before, Some(id));
+        }
     }
 
     fn mode(&mut self, id: u64, p: &[String]) {
-        if !p[0].starts_with(['#', '&']) {
-            if fold(&p[0]) != fold(&self.clients[&id].nick) {
-                self.numeric(id, 502, ":Cannot change mode for other users");
-            } else if p.len() == 1 {
-                self.numeric(id, 221, &format!("+{}", self.clients[&id].modes()));
-            } else {
-                let (mut adding, mut unknown, mut applied) = (true, false, String::new());
-                for mode in p[1].chars() {
-                    let c = self.clients.get_mut(&id).unwrap();
-                    match mode {
-                        '+' => adding = true,
-                        '-' => adding = false,
-                        // RFC 2812: a client setting +o on itself is ignored; only OPER grants it.
-                        'o' => {
-                            if !adding && c.oper.take().is_some() {
-                                channel::push_mode(&mut applied, false, 'o');
+        if p[0].starts_with(['#', '&']) {
+            self.channel_mode(id, p);
+            return;
+        }
+        if fold(&p[0]) != fold(&self.clients[&id].nick) {
+            self.numeric(id, 502, ":Cannot change mode for other users");
+            return;
+        }
+        if p.len() == 1 {
+            self.numeric(id, 221, &format!("+{}", self.clients[&id].modes()));
+            return;
+        }
+        let prefix = self.clients[&id].prefix();
+        let oper = self.clients[&id].oper.is_some();
+        let (mut adding, mut unknown, mut applied, mut arg) = (true, false, String::new(), 2);
+        let (mut snomask, mut host) = (false, false);
+        for mode in p[1].chars() {
+            let c = self.clients.get_mut(&id).unwrap();
+            match mode {
+                '+' => adding = true,
+                '-' => adding = false,
+                // RFC 2812: +o comes only from OPER; dropping it drops the operator modes.
+                'o' => {
+                    if !adding && c.oper.take().is_some() {
+                        channel::push_mode(&mut applied, false, 'o');
+                        for m in modes::OPER_ONLY.chars() {
+                            if c.umodes.remove(&m) {
+                                channel::push_mode(&mut applied, false, m);
                             }
                         }
-                        'i' => {
-                            if c.invisible != adding {
-                                c.invisible = adding;
-                                channel::push_mode(&mut applied, adding, 'i');
-                            }
-                        }
-                        // shortcut: +w is accepted without effect because WALLOPS always reach
-                        // every operator; add a wallops opt-in if users need one.
-                        'w' => {}
-                        _ => unknown = true,
+                        c.snomask.clear();
                     }
                 }
-                if !applied.is_empty() {
-                    let c = &self.clients[&id];
-                    self.send(id, &format!(":{} MODE {} :{applied}", c.prefix(), c.nick));
+                // -t gives up a services vhost.
+                't' => {
+                    if !adding && !c.cloak.is_empty() {
+                        c.cloak.clear();
+                        channel::push_mode(&mut applied, false, 't');
+                        host = true;
+                    }
                 }
-                if unknown {
-                    self.numeric(id, 501, ":Unknown MODE flag");
+                // +s takes a snomask such as +cF-k; with none, the default set.
+                's' if adding && oper => {
+                    let mut mask: BTreeSet<char> = c.snomask.chars().collect();
+                    match p.get(arg) {
+                        Some(spec) => {
+                            arg += 1;
+                            let mut on = true;
+                            for letter in spec.chars() {
+                                match letter {
+                                    '+' => on = true,
+                                    '-' => on = false,
+                                    l if modes::SNOMASKS.contains(l) && on => {
+                                        mask.insert(l);
+                                    }
+                                    l => {
+                                        mask.remove(&l);
+                                    }
+                                }
+                            }
+                        }
+                        None if mask.is_empty() => mask = modes::DEFAULT_SNOMASK.chars().collect(),
+                        None => {}
+                    }
+                    c.snomask = mask.into_iter().collect();
+                    snomask = true;
+                    let wanted = !c.snomask.is_empty();
+                    if c.has('s') != wanted {
+                        if wanted {
+                            c.umodes.insert('s');
+                        } else {
+                            c.umodes.remove(&'s');
+                        }
+                        channel::push_mode(&mut applied, wanted, 's');
+                    }
                 }
+                's' if !adding => {
+                    if c.umodes.remove(&'s') {
+                        c.snomask.clear();
+                        channel::push_mode(&mut applied, false, 's');
+                    }
+                }
+                m if modes::USER_SETTABLE.contains(m) || (oper && modes::OPER_ONLY.contains(m)) => {
+                    // +Z needs a TLS connection of one's own.
+                    if m == 'Z' && adding && !c.has('z') {
+                        continue;
+                    }
+                    if c.has(m) != adding {
+                        if adding {
+                            c.umodes.insert(m);
+                        } else {
+                            c.umodes.remove(&m);
+                        }
+                        channel::push_mode(&mut applied, adding, m);
+                        host |= m == 'x';
+                    }
+                }
+                // Set by the server or services, or only by operators.
+                m if modes::USER_MODES.contains(m) => {}
+                _ => unknown = true,
             }
-            return;
         }
-        self.channel_mode(id, p);
-    }
-
-    fn kick(&mut self, id: u64, p: &[String]) {
-        let key = fold(&p[0]);
-        let Some(ch) = self.channels.get(&key) else {
-            self.numeric(id, 403, &format!("{} :No such channel", p[0]));
-            return;
-        };
-        if !ch.members.contains_key(&id) && !self.privileged(id) {
-            self.numeric(id, 442, &format!("{} :You're not on that channel", p[0]));
-            return;
+        let c = &self.clients[&id];
+        if !applied.is_empty() {
+            self.send(id, &format!(":{prefix} MODE {} :{applied}", c.nick));
         }
-        if !ch.is_op(id) && !self.privileged(id) {
-            self.numeric(id, 482, &format!("{} :You're not channel operator", p[0]));
-            return;
+        if snomask && c.has('s') {
+            self.numeric(id, 8, &format!("+{} :Server notice mask", c.snomask));
         }
-        for nick in p[1].split(',') {
-            let Some(other) = self.find_nick(nick) else {
-                self.numeric(id, 401, &format!("{nick} :No such nick"));
-                continue;
-            };
-            let Some(ch) = self.channels.get(&key) else {
-                break;
-            };
-            if !ch.members.contains_key(&other) {
-                self.numeric(
-                    id,
-                    441,
-                    &format!("{nick} {} :They aren't on that channel", p[0]),
-                );
-                continue;
-            }
-            let reason = p
-                .get(2)
-                .filter(|r| !r.is_empty())
-                .unwrap_or(&self.clients[&id].nick)
-                .clone();
-            self.broadcast(
-                ch.members.keys().copied(),
-                &format!(
-                    ":{} KICK {} {} :{reason}",
-                    self.clients[&id].prefix(),
-                    ch.name,
-                    self.clients[&other].nick,
-                ),
+        if host {
+            self.numeric(
+                id,
+                396,
+                &format!("{} :is now your displayed host", c.shown()),
             );
-            self.remove_member(other, &key);
-            self.kicked.insert((key.clone(), other), reason);
-            if other == id {
-                break;
-            }
+        }
+        if unknown {
+            self.numeric(id, 501, ":Unknown MODE flag");
         }
     }
 
     fn tick(&mut self) {
         self.prune_server_bans();
         let now = Instant::now();
+        // Modes set for a while (+f actions, ~time entries) come off; peers hear of it.
+        let unix = timestamp();
+        if self.timed.iter().any(|t| t.at <= unix) {
+            let before = self.channels.clone();
+            let (due, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.timed)
+                .into_iter()
+                .partition(|t| t.at <= unix);
+            self.timed = rest;
+            for t in due {
+                self.server_mode(&t.key, false, t.mode, t.param);
+            }
+            self.sync_channels(&before, None);
+        }
+        self.joins
+            .retain(|_, (start, _)| now.duration_since(*start) < Duration::from_secs(1000));
         self.deleted_users
             .retain(|_, at| now.duration_since(*at) < Duration::from_secs(120));
         let mut expired = Vec::new();
@@ -1657,9 +2033,13 @@ fn accept(server: &Arc<Mutex<Server>>, mut stream: TcpStream, proxied: bool) -> 
         id = state.next_id;
         let home = state.config.name.clone();
         let uid = format!("{home}!{}!{id}", state.boot);
-        state
-            .clients
-            .insert(id, Client::new(uid, home, host, tx, socket));
+        let mut client = Client::new(uid, home, host, tx, socket);
+        client.masked_host = modes::cloak(&state.cloak_key, &client.host);
+        // The PROXY listener is for a TLS proxy (docs/TLS.md), so its users are +z.
+        if proxied {
+            client.umodes.insert('z');
+        }
+        state.clients.insert(id, client);
     }
     let write_state = Arc::clone(server);
     thread::spawn(move || {

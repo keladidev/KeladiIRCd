@@ -31,14 +31,14 @@ impl Daemon {
         (daemon, address)
     }
 
-    fn network(name: &str, rows: &str) -> (Self, String, String) {
+    fn network(name: &str, config: &str) -> (Self, String, String) {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let path =
-            std::env::temp_dir().join(format!("keladiircd-{}-{unique}.conf", std::process::id()));
-        std::fs::write(&path, rows).unwrap();
+            std::env::temp_dir().join(format!("keladiircd-{}-{unique}.toml", std::process::id()));
+        std::fs::write(&path, config).unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_keladiircd"))
             .args([
                 "--listen",
@@ -69,6 +69,16 @@ impl Daemon {
         std::thread::spawn(move || for _ in log.lines() {});
         (Self(child, Some(path)), client_address, link_address)
     }
+}
+
+/// A [[link]] block for the test networks; `connect` is the peer's link address.
+fn link(name: &str, connect: Option<&str>) -> String {
+    let connect = connect.map_or(String::new(), |a| format!("connect = \"{a}\"\n"));
+    format!("[[link]]\nname = \"{name}\"\n{connect}incoming_ip = \"127.0.0.1\"\npassword_env = \"TEST_LINK_SECRET\"\n")
+}
+
+fn oper(name: &str, ip_mask: &str, class: &str) -> String {
+    format!("[[oper]]\nname = \"{name}\"\nip_mask = \"{ip_mask}\"\nclass = \"{class}\"\npassword_env = \"TEST_OPER_SECRET\"\n")
 }
 
 impl Drop for Daemon {
@@ -128,6 +138,15 @@ impl Client {
         panic!("No {marker:?} in {lines:?}");
     }
 
+    /// Lines received until the server answers a PING sent now. The server handles
+    /// each client's lines in order, so this is everything already sent to it.
+    fn sync(&mut self) -> Vec<String> {
+        self.send("PING :sync");
+        let mut lines = self.until(" PONG ");
+        lines.pop();
+        lines
+    }
+
     fn register(&mut self, nick: &str) {
         self.send(&format!("NICK {nick}\r\nUSER guest 0 * :Test User"));
         let welcome = self.until(" 376 ");
@@ -178,7 +197,7 @@ fn link_handshake(
     let mut reader = BufReader::new(socket.try_clone().unwrap());
     let ours = "0123456789abcdef0123456789abcdef";
     socket
-        .write_all(format!("KELADILINK 4 {name} {ours} {}\r\n", hex(known)).as_bytes())
+        .write_all(format!("KELADILINK 5 {name} {ours} {}\r\n", hex(known)).as_bytes())
         .unwrap();
     let mut challenge = String::new();
     reader.read_line(&mut challenge).unwrap();
@@ -247,11 +266,11 @@ fn real_clients_registration_chat_permissions_and_cleanup() {
     assert!(outsider
         .line()
         .ends_with(" 368 Eve #Room :End of channel ban list"));
-    // +i is real; +w is accepted silently; +o via MODE is ignored; unknown letters get 501.
-    outsider.send("MODE Eve +iw\r\nMODE Eve +o\r\nMODE Eve +x\r\nMODE Eve");
-    assert!(outsider.line().ends_with(" MODE Eve :+i"));
+    // +i and +w are real; +o via MODE is ignored; unknown letters get 501.
+    outsider.send("MODE Eve +iw\r\nMODE Eve +o\r\nMODE Eve +Y\r\nMODE Eve");
+    assert!(outsider.line().ends_with(" MODE Eve :+iw"));
     assert!(outsider.line().contains(" 501 Eve "));
-    assert!(outsider.line().ends_with(" 221 Eve +i"));
+    assert!(outsider.line().ends_with(" 221 Eve +iw"));
 
     bob.send("TOPIC #room :unauthorized");
     assert!(bob.line().contains(" 482 "));
@@ -411,7 +430,10 @@ USER guest 0 * :Guest",
 
 #[test]
 fn linked_servers_burst_remote_chat_operator_permissions_and_split() {
-    let (mut a, addr_a, link_a) = Daemon::network("a.test", "link b.test - 127.0.0.1 TEST_LINK_SECRET\noper admin 127.0.0.1 override TEST_OPER_SECRET\n");
+    let (mut a, addr_a, link_a) = Daemon::network(
+        "a.test",
+        &(link("b.test", None) + &oper("admin", "127.0.0.1", "override")),
+    );
     let mut alice = Client::connect(&addr_a);
     alice.register("Alice");
     alice.join("#network");
@@ -432,7 +454,7 @@ fn linked_servers_burst_remote_chat_operator_permissions_and_split() {
     // A correct proof is answered with the server's own proof, then cycles are refused.
     let (_cyclic, mut reader, hello) =
         link_handshake(&link_a, "b.test", "link-secret", "b.test,a.test");
-    assert!(hello.starts_with("KELADILINK 4 a.test "), "{hello}");
+    assert!(hello.starts_with("KELADILINK 5 a.test "), "{hello}");
     assert!(
         !hello.contains("6c696e6b2d736563726574"),
         "The secret crossed the wire"
@@ -478,7 +500,16 @@ fn linked_servers_burst_remote_chat_operator_permissions_and_split() {
         "Peer introduced a server behind an unknown uplink"
     );
 
-    let (_b, addr_b, link_b) = Daemon::network("b.test", &format!("link a.test {link_a} 127.0.0.1 TEST_LINK_SECRET\nlink c.test - 127.0.0.1 TEST_LINK_SECRET\noper local 127.0.0.1 local TEST_OPER_SECRET\noper restricted 192.0.2.* global TEST_OPER_SECRET\n"));
+    let (_b, addr_b, link_b) = Daemon::network(
+        "b.test",
+        &[
+            link("a.test", Some(&link_a)),
+            link("c.test", None),
+            oper("local", "127.0.0.1", "local"),
+            oper("restricted", "192.0.2.*", "global"),
+        ]
+        .concat(),
+    );
     let mut bob = Client::connect(&addr_b);
     bob.register("Bob");
     bob.wait_nick("Alice", true);
@@ -566,10 +597,7 @@ fn linked_servers_burst_remote_chat_operator_permissions_and_split() {
         .iter()
         .any(|s| s.contains(" Alice H* :0 ")));
 
-    let (_c, addr_c, _link_c) = Daemon::network(
-        "c.test",
-        &format!("link b.test {link_b} 127.0.0.1 TEST_LINK_SECRET\n"),
-    );
+    let (_c, addr_c, _link_c) = Daemon::network("c.test", &link("b.test", Some(&link_b)));
     let mut carol = Client::connect(&addr_c);
     carol.register("Carol");
     carol.wait_nick("Alice", true);
@@ -661,12 +689,14 @@ fn linked_servers_burst_remote_chat_operator_permissions_and_split() {
 
 #[test]
 fn relink_collision_and_unplanned_netsplit() {
-    let (mut b, addr_b, link_b) =
-        Daemon::network("b.test", "link a.test - 127.0.0.1 TEST_LINK_SECRET\n");
+    let (mut b, addr_b, link_b) = Daemon::network("b.test", &link("a.test", None));
     let mut bob = Client::connect(&addr_b);
     bob.register("Bob");
     bob.join("#merge");
-    let (_a, addr_a, _link_a) = Daemon::network("a.test", &format!("link b.test {link_b} 127.0.0.1 TEST_LINK_SECRET\noper admin 127.0.0.1 override TEST_OPER_SECRET\n"));
+    let (_a, addr_a, _link_a) = Daemon::network(
+        "a.test",
+        &(link("b.test", Some(&link_b)) + &oper("admin", "127.0.0.1", "override")),
+    );
     let mut alice = Client::connect(&addr_a);
     alice.register("Alice");
     alice.wait_nick("Bob", true);
@@ -866,7 +896,7 @@ impl Services {
 fn services_link_speaks_ngircd_protocol() {
     let (_a, addr_a, link_a) = Daemon::network(
         "a.test",
-        "services services.test 127.0.0.1 TEST_LINK_SECRET\n",
+        "[[services]]\nname = \"services.test\"\nincoming_ip = \"127.0.0.1\"\npassword_env = \"TEST_LINK_SECRET\"\n",
     );
     let mut alice = Client::connect(&addr_a);
     alice.register("Alice");
@@ -923,7 +953,8 @@ fn services_link_speaks_ngircd_protocol() {
         ]
     );
 
-    // Logins and +R reach the user, without being echoed to services.
+    // Logins and +R (identified, KeladiIRCd's +r) reach the user, without being
+    // echoed to services.
     services.send(":services.test METADATA Alice accountname alice\r\n:NickServ MODE Alice +R\r\n:NickServ NOTICE Alice :You are now identified.");
     assert!(
         services.sync().is_empty(),
@@ -932,7 +963,7 @@ fn services_link_speaks_ngircd_protocol() {
     assert!(alice
         .line()
         .contains(" 900 Alice Alice!~guest@127.0.0.1 alice "));
-    assert_eq!(alice.line(), ":services.test MODE Alice :+R");
+    assert_eq!(alice.line(), ":services.test MODE Alice :+r");
     assert_eq!(
         alice.line(),
         ":NickServ!~services@services.host NOTICE Alice :You are now identified."
@@ -1074,11 +1105,16 @@ fn eventually_registers(address: &str, nick: &str) -> bool {
 
 #[test]
 fn server_bans_kline_and_gline() {
-    let (_a, addr_a, link_a) = Daemon::network("a.test", "link b.test - 127.0.0.1 TEST_LINK_SECRET\noper admin 127.0.0.1 global TEST_OPER_SECRET\noper helper 127.0.0.1 local TEST_OPER_SECRET\n");
-    let (_b, addr_b, _link_b) = Daemon::network(
-        "b.test",
-        &format!("link a.test {link_a} 127.0.0.1 TEST_LINK_SECRET\n"),
+    let (_a, addr_a, link_a) = Daemon::network(
+        "a.test",
+        &[
+            link("b.test", None),
+            oper("admin", "127.0.0.1", "global"),
+            oper("helper", "127.0.0.1", "local"),
+        ]
+        .concat(),
     );
+    let (_b, addr_b, _link_b) = Daemon::network("b.test", &link("a.test", Some(&link_a)));
     let mut admin = Client::connect(&addr_a);
     admin.register("Admin");
     admin.oper("admin");
@@ -1191,8 +1227,10 @@ fn fake_anope_rpc() -> String {
 #[test]
 fn sasl_plain_logs_in_through_anope_rpc() {
     let rpc = fake_anope_rpc();
-    let (_a, address, _link) =
-        Daemon::network("a.test", &format!("sasl {rpc} /jsonrpc TEST_OPER_SECRET\n"));
+    let (_a, address, _link) = Daemon::network(
+        "a.test",
+        &format!("[sasl]\naddress = \"{rpc}\"\ntoken_env = \"TEST_OPER_SECRET\"\n"),
+    );
     let mut client = Client::connect(&address);
     client.send("CAP LS 302");
     assert!(client
@@ -1258,6 +1296,7 @@ fn proxy_listener_takes_the_users_address_from_the_header() {
     let _daemon = Daemon(child, None);
     let mut line = String::new();
     log.read_line(&mut line).unwrap();
+    let plain = line.split_whitespace().nth(3).unwrap().to_string();
     line.clear();
     log.read_line(&mut line).unwrap();
     assert!(line.starts_with("KeladiIRCd PROXY listener on "), "{line}");
@@ -1268,10 +1307,30 @@ fn proxy_listener_takes_the_users_address_from_the_header() {
     user.send("PROXY TCP4 203.0.113.7 127.0.0.1 51000 6697");
     user.register("Remote");
     user.send("WHOIS Remote");
-    assert!(user
-        .until(" 318 ")
+    let whois = user.until(" 318 ");
+    assert!(whois
         .iter()
         .any(|s| s.contains(" 311 Remote Remote ~guest 203.0.113.7 ")));
+    // The proxy listener is for TLS, so its users are +z.
+    assert!(whois
+        .iter()
+        .any(|s| s.ends_with(" 671 Remote Remote :is using a secure connection")));
+
+    // +z admits only TLS users; the server adds +Z while every member uses TLS.
+    user.send("JOIN #tls\r\nMODE #tls +z");
+    user.until(":irc.test MODE #tls +Z");
+    let mut insecure = Client::connect(&plain);
+    insecure.register("Plain");
+    insecure.send("JOIN #tls\r\nPRIVMSG Remote :hi");
+    assert!(insecure
+        .line()
+        .ends_with(" 489 Plain #tls :Cannot join channel (SSL/TLS required)"));
+    user.send("MODE Remote +Z");
+    user.sync();
+    insecure.send("PRIVMSG Remote :hi");
+    assert!(insecure
+        .line()
+        .contains(" 531 Plain Remote :Remote accepts private messages only over TLS (+Z)"));
 
     // A connection without the header is closed before it reaches IRC.
     let mut bare = Client::connect(&proxy);
@@ -1279,4 +1338,357 @@ fn proxy_listener_takes_the_users_address_from_the_header() {
     let mut data = [0u8; 64];
     // Closed or reset (Windows resets when unread data is discarded), never answered.
     assert!(!matches!(bare.socket.read(&mut data), Ok(n) if n > 0));
+}
+
+#[test]
+fn unrealircd_user_and_channel_modes() {
+    let (_daemon, address, _) = Daemon::network(
+        "irc.test",
+        &format!(
+            "badwords = \"darn\"\n{}{}",
+            oper("admin", "*", "global"),
+            oper("root", "*", "override")
+        ),
+    );
+    let mut op = Client::connect(&address);
+    op.register("Op");
+    let mut bob = Client::connect(&address);
+    bob.register("Bob");
+    op.join("#u");
+    bob.join("#u");
+    op.sync();
+
+    // Owner (~), admin (&) and halfop (%) statuses. A channel's creator is an
+    // operator; only an owner (or services, or an override operator) makes owners.
+    op.send("MODE #u +q Op");
+    assert!(op.sync()[0].ends_with(" 499 Op #u :You're not a channel owner"));
+    let mut root = Client::connect(&address);
+    root.register("Root");
+    root.oper("root");
+    root.send("MODE #u +q Op");
+    root.sync();
+    op.send("MODE #u +h Bob\r\nNAMES #u");
+    let lines = op.sync();
+    assert!(
+        lines[0].ends_with("Root!~guest@127.0.0.1 MODE #u +q Op"),
+        "{lines:?}"
+    );
+    assert!(lines[2].ends_with(" 353 Op = #u :~Op %Bob"), "{lines:?}");
+    bob.sync();
+    // A halfop cannot give operator status or kick an owner.
+    bob.send("MODE #u +o Bob\r\nKICK #u Op");
+    let lines = bob.sync();
+    assert!(
+        lines[0].contains(" 482 ") && lines[1].contains(" 482 "),
+        "{lines:?}"
+    );
+    op.send("MODE #u -h+cCT Bob");
+    op.sync();
+    bob.sync();
+
+    // +c, +C and +T refuse colours, CTCPs and notices; plain text passes.
+    bob.send("PRIVMSG #u :\x0304red\r\nPRIVMSG #u :\x01VERSION\x01\r\nNOTICE #u :hi\r\nPRIVMSG #u :plain");
+    let lines = bob.sync();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(
+        lines[0].ends_with(" 404 Bob #u :Cannot send to channel (Colors are not permitted (+c))")
+    );
+    assert!(lines[1].ends_with("(CTCPs are not permitted (+C))"));
+    assert_eq!(op.sync(), [":Bob!~guest@127.0.0.1 PRIVMSG #u :plain"]);
+
+    // +S strips formatting and +G censors bad words.
+    op.send("MODE #u -cCT+SG");
+    op.sync();
+    bob.sync();
+    bob.send("PRIVMSG #u :\x02bold\x02 darn it");
+    bob.sync();
+    assert!(op.sync()[0].ends_with("PRIVMSG #u :bold <censored> it"));
+
+    // +N stops nick changes; ~quiet stops speaking; +e excepts.
+    op.send("MODE #u -SG+N");
+    op.sync();
+    bob.sync();
+    bob.send("NICK Robert");
+    assert!(bob.sync()[0].ends_with(" 447 Bob :Can not change nickname while on #u (+N)"));
+    op.send("MODE #u -N+b ~q:Bob");
+    assert!(op.sync()[0].ends_with(" MODE #u -N+b ~quiet:Bob!*@*"));
+    bob.sync();
+    bob.send("PRIVMSG #u :quiet?");
+    assert!(bob.sync()[0].ends_with("(You are banned)"));
+    op.send("MODE #u +e Bob");
+    op.sync();
+    bob.sync();
+    bob.send("PRIVMSG #u :excepted");
+    bob.sync();
+    assert!(op.sync()[0].ends_with("PRIVMSG #u :excepted"));
+    op.send("MODE #u -be ~quiet:Bob!*@* Bob!*@*\r\nMODE #u e");
+    let lines = op.sync();
+    assert!(
+        lines[1].ends_with(" 349 Op #u :End of channel exception list"),
+        "{lines:?}"
+    );
+    bob.sync();
+
+    // +D hides joins until the user speaks; channel operators see them.
+    op.send("MODE #u +D");
+    op.sync();
+    bob.sync();
+    let mut carol = Client::connect(&address);
+    carol.register("Carol");
+    carol.join("#u");
+    assert!(op.sync()[0].ends_with("Carol!~guest@127.0.0.1 JOIN #u"));
+    assert!(bob.sync().is_empty());
+    bob.send("NAMES #u");
+    assert!(bob.sync()[0].ends_with(" :~Op Bob"));
+    carol.send("PRIVMSG #u :hello");
+    carol.sync();
+    let lines = bob.sync();
+    assert!(
+        lines[0].ends_with("Carol!~guest@127.0.0.1 JOIN #u"),
+        "{lines:?}"
+    );
+    assert!(lines[1].ends_with("PRIVMSG #u :hello"), "{lines:?}");
+    assert_eq!(op.sync().len(), 1);
+    // With +D off, the server shows +d while someone is still hidden.
+    let mut dave = Client::connect(&address);
+    dave.register("Dave");
+    dave.join("#u");
+    op.send("MODE #u -D");
+    let lines = op.sync();
+    assert!(
+        lines[1].ends_with(" MODE #u -D") && lines[2] == ":irc.test MODE #u +d",
+        "{lines:?}"
+    );
+    dave.send("PART #u");
+    dave.sync();
+    let lines = op.sync();
+    assert!(
+        lines[0].ends_with("Dave!~guest@127.0.0.1 PART #u :Dave"),
+        "{lines:?}"
+    );
+    assert_eq!(lines[1], ":irc.test MODE #u -d");
+    assert!(bob.sync().iter().all(|l| !l.contains("PART")));
+    carol.sync();
+
+    // +Q stops kicks; +V stops invitations.
+    op.send("MODE #u +Q\r\nKICK #u Bob\r\nMODE #u -Q+V\r\nINVITE Dave #u");
+    let lines = op.sync();
+    assert!(
+        lines[1].ends_with(" 972 Op KICK :Kicks are not allowed in #u (+Q)"),
+        "{lines:?}"
+    );
+    assert!(
+        lines[3].ends_with(" 518 Op :Cannot invite (+V) at channel #u"),
+        "{lines:?}"
+    );
+
+    // KNOCK reaches the operators of an invite-only channel, unless +K; +I admits.
+    op.send("MODE #u -V+i");
+    op.sync();
+    dave.send("KNOCK #u :let me in");
+    assert!(dave.sync()[0].ends_with("NOTICE Dave :Knocked on #u"));
+    assert!(op.sync()[0].ends_with(" NOTICE @#u :[Knock] by Dave!~guest@127.0.0.1 (let me in)"));
+    op.send("MODE #u +K");
+    op.sync();
+    dave.send("KNOCK #u\r\nJOIN #u");
+    let lines = dave.sync();
+    assert!(lines[0].ends_with(" 480 Dave :Cannot knock on #u (No knocks are allowed! (+K))"));
+    assert!(lines[1].contains(" 473 Dave #u "));
+    op.send("MODE #u +I Dave");
+    op.sync();
+    dave.join("#u");
+
+    // A full channel (+l) passes joiners on to its +L channel.
+    op.send("MODE #u -iKI+lL Dave 4 #overflow");
+    op.sync();
+    let mut eve = Client::connect(&address);
+    eve.register("Eve");
+    eve.send("JOIN #u");
+    let lines = eve.sync();
+    assert!(lines[0].contains(" 470 Eve #u #overflow :"), "{lines:?}");
+    assert!(lines
+        .iter()
+        .any(|l| l.ends_with("Eve!~guest@127.0.0.1 JOIN #overflow")));
+    // +j limits how often one user joins.
+    op.send("MODE #u -lL+j 1:60");
+    op.sync();
+    eve.send("JOIN #u\r\nPART #u\r\nJOIN #u");
+    let lines = eve.sync();
+    assert!(
+        lines
+            .last()
+            .unwrap()
+            .contains(" 500 Eve #u :Too many join requests"),
+        "{lines:?}"
+    );
+
+    // +f kicks a user sending too many lines.
+    op.send("MODE #u -j+f [2t]:60");
+    op.sync();
+    dave.send("PRIVMSG #u :1\r\nPRIVMSG #u :2\r\nPRIVMSG #u :3");
+    assert!(dave
+        .sync()
+        .iter()
+        .any(|l| l == ":irc.test KICK #u Dave :Flooding (text limit is 2 per 60 seconds)"));
+
+    // +H plays recent messages to new members.
+    op.send("MODE #u -f+H 10:1h\r\nPRIVMSG #u :remember me");
+    op.sync();
+    let mut frank = Client::connect(&address);
+    frank.register("Frank");
+    frank.send("JOIN #u");
+    assert!(frank
+        .sync()
+        .iter()
+        .any(|l| l == ":Op!~guest@127.0.0.1 PRIVMSG #u :remember me"));
+
+    // +O and +P need an IRC operator; a +P channel outlives its last member, and
+    // finding it empty gives no one operator status.
+    op.send("MODE #u +O");
+    assert!(op.sync().iter().any(|l| l.contains(" 481 ")));
+    op.oper("admin");
+    op.join("#keep");
+    op.send("MODE #keep +P\r\nPART #keep\r\nLIST #keep");
+    assert!(op.sync().iter().any(|l| l.ends_with(" 322 Op #keep 0 :")));
+    bob.join("#keep");
+    bob.send("NAMES #keep");
+    assert!(bob.sync()[0].ends_with(" 353 Bob = #keep :Bob"));
+
+    // Server notices (+s) with a snomask.
+    op.send("MODE Op +s +c");
+    let lines = op.sync();
+    assert!(
+        lines[0].ends_with(" MODE Op :+s") && lines[1].ends_with(" 008 Op +c :Server notice mask"),
+        "{lines:?}"
+    );
+    let mut gina = Client::connect(&address);
+    gina.register("Gina");
+    assert!(op.sync()[0].ends_with(
+        ":irc.test NOTICE Op :*** Client connecting: Gina (~guest@127.0.0.1) [127.0.0.1]"
+    ));
+
+    // User modes: cloak (+x), bot (+B), no private messages (+D), no CTCPs (+T).
+    gina.send("MODE Gina +xBDT");
+    let lines = gina.sync();
+    assert!(lines[0].ends_with(" MODE Gina :+xBDT"), "{lines:?}");
+    let cloak = lines[1].split(' ').nth(3).unwrap().to_string();
+    assert!(cloak.ends_with(".IP") && lines[1].ends_with(" :is now your displayed host"));
+    bob.send("WHOIS Gina\r\nPRIVMSG Gina :hi");
+    let lines = bob.sync();
+    assert!(lines
+        .iter()
+        .any(|l| l.contains(&format!(" 311 Bob Gina ~guest {cloak} "))));
+    assert!(lines
+        .iter()
+        .any(|l| l.ends_with(" 335 Bob Gina :is a Bot on KeladiIRC")));
+    assert!(!lines.iter().any(|l| l.contains(" 378 ")));
+    assert!(lines
+        .iter()
+        .any(|l| l.ends_with(" 531 Bob Gina :Gina does not accept private messages (+D)")));
+    op.send("WHOIS Gina\r\nPRIVMSG Gina :from an operator");
+    assert!(op
+        .sync()
+        .iter()
+        .any(|l| l.contains(" 378 Op Gina :is connecting from *@127.0.0.1")));
+    assert!(gina.sync()[0].ends_with("PRIVMSG Gina :from an operator"));
+    // +R takes private messages only from registered users.
+    gina.send("MODE Gina -D+R");
+    gina.sync();
+    bob.send("PRIVMSG Gina :hi");
+    assert!(bob.sync()[0].contains(" 486 Bob Gina :"));
+    // +d (deaf) users get no channel messages.
+    gina.send("MODE Gina +d\r\nJOIN #keep");
+    gina.sync();
+    bob.send("PRIVMSG #keep :anyone?");
+    bob.sync();
+    assert!(gina.sync().is_empty());
+
+    // Operator-only modes: hidden status (+H) and idle time (+I), private
+    // channels (+p, any user), and whois notices (+W).
+    op.send("MODE Op +HIpW");
+    op.sync();
+    bob.send("WHOIS Op");
+    let lines = bob.sync();
+    assert!(
+        !lines
+            .iter()
+            .any(|l| [" 313 ", " 317 ", " 319 "].iter().any(|c| l.contains(c))),
+        "{lines:?}"
+    );
+    assert!(op.sync()[0].ends_with(":*** Bob (~guest@127.0.0.1) did a /whois on you"));
+    // Dropping operator status drops the operator-only modes.
+    op.send("MODE Op -o");
+    assert!(op.sync()[0].ends_with(" MODE Op :-oHIsW"));
+}
+
+/// Sends `command` until the reply's first line ends with `expected`, for state that
+/// reaches this server over a link.
+fn eventually(client: &mut Client, command: &str, expected: &str) -> Vec<String> {
+    for _ in 0..50 {
+        client.send(command);
+        let lines = client.sync();
+        if lines.iter().any(|l| l.ends_with(expected)) {
+            return lines;
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    panic!("{command} never answered {expected:?}");
+}
+
+#[test]
+fn unrealircd_modes_cross_server_links() {
+    let (_b, addr_b, link_b) = Daemon::network("b.test", &link("a.test", None));
+    let (_a, addr_a, _) = Daemon::network("a.test", &link("b.test", Some(&link_b)));
+    let mut alice = Client::connect(&addr_a);
+    alice.register("Alice");
+    let mut bob = Client::connect(&addr_b);
+    bob.register("Bob");
+    alice.wait_nick("Bob", true);
+    bob.wait_nick("Alice", true);
+
+    // Mode parameters, exception lists, user modes and cloaks reach the other server.
+    alice.join("#net");
+    alice.send("MODE #net +Hj-t+e 10:1h 2:60 ~a:bob\r\nMODE Alice +xB");
+    alice.sync();
+    alice.send("PRIVMSG #net :kept for later");
+    alice.sync();
+    eventually(&mut bob, "MODE #net", " 324 Bob #net +nHj 10:1h 2:60");
+    assert!(bob.sync().is_empty());
+    bob.send("MODE #net e");
+    assert!(bob.sync()[0].ends_with(" 348 Bob #net ~account:bob"));
+    let whois = eventually(
+        &mut bob,
+        "WHOIS Alice",
+        " 335 Bob Alice :is a Bot on KeladiIRC",
+    );
+    assert!(whois
+        .iter()
+        .any(|l| l.contains(" 311 Bob Alice ~guest ") && l.contains(".IP ")));
+    // +H history recorded on a.test plays to a joiner on b.test.
+    bob.send("JOIN #net");
+    assert!(bob
+        .sync()
+        .iter()
+        .any(|l| l.ends_with("PRIVMSG #net :kept for later") && l.contains(".IP ")));
+    alice.sync();
+
+    // A delayed-join (+D) member stays hidden on every server.
+    alice.send("MODE #net +D");
+    alice.sync();
+    let mut carol = Client::connect(&addr_b);
+    carol.register("Carol");
+    carol.join("#net");
+    eventually(&mut alice, "NAMES #net", " :@Alice Bob Carol");
+    let mut dan = Client::connect(&addr_a);
+    dan.register("Dan");
+    dan.join("#net");
+    dan.send("NAMES #net");
+    let names = dan.sync();
+    // The join also replays +H history, after its NAMES.
+    assert!(
+        names
+            .iter()
+            .any(|l| l.ends_with(" 353 Dan = #net :@Alice Bob Dan")),
+        "{names:?}"
+    );
 }

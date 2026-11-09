@@ -2,9 +2,17 @@ use keladiircd::{serve, Config};
 use std::{env, io, net::TcpListener};
 
 fn main() -> io::Result<()> {
+    let args: Vec<String> = env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("KeladiIRCd\nUsage: keladiircd [--config keladiircd.toml] [--listen 127.0.0.1:6667] [--name irc.local] [--description \"KeladiIRC server\"] [--link-listen 127.0.0.1:7000] [--proxy-listen 127.0.0.1:6668] [--max-users 256]\nThe config file is TOML; examples/keladiircd.toml explains every key. Flags override the file.\nOptional environment variable: KELADIIRCD_PASSWORD (connection password)");
+        return Ok(());
+    }
     let mut config = Config::default();
-    let mut config_file = None;
-    let mut args = env::args().skip(1);
+    // Read the file first so command-line flags override it.
+    if let Some(i) = args.iter().position(|a| a == "--config") {
+        config.load(args.get(i + 1).ok_or_else(|| missing("--config"))?)?;
+    }
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--listen" => config.listen = value(&mut args, &arg)?,
@@ -12,15 +20,13 @@ fn main() -> io::Result<()> {
             "--description" => config.description = value(&mut args, &arg)?,
             "--link-listen" => config.link_listen = Some(value(&mut args, &arg)?),
             "--proxy-listen" => config.proxy_listen = Some(value(&mut args, &arg)?),
-            "--config" => config_file = Some(value(&mut args, &arg)?),
+            "--config" => {
+                value(&mut args, &arg)?;
+            }
             "--max-users" => {
                 config.max_users = value(&mut args, &arg)?.parse().map_err(|_| {
                     io::Error::new(io::ErrorKind::InvalidInput, "--max-users needs a number")
                 })?
-            }
-            "--help" | "-h" => {
-                println!("KeladiIRCd\nUsage: keladiircd [--listen 127.0.0.1:6667] [--name irc.local] [--description \"KeladiIRC server\"] [--link-listen 127.0.0.1:7000] [--proxy-listen 127.0.0.1:6668] [--max-users 256] [--config keladiircd.conf]\nOptional environment variable: KELADIIRCD_PASSWORD (connection password)\nConfig rows: oper NAME IP_MASK local|global|override PASSWORD_ENV\n             link SERVER ADDRESS_OR_- INCOMING_IP PASSWORD_ENV\n             services SERVER INCOMING_IP PASSWORD_ENV\n             sasl ANOPE_HTTPD_ADDRESS JSONRPC_PATH TOKEN_ENV");
-                return Ok(());
             }
             _ => {
                 return Err(io::Error::new(
@@ -33,9 +39,6 @@ fn main() -> io::Result<()> {
     config.password = env::var("KELADIIRCD_PASSWORD")
         .ok()
         .filter(|s| !s.is_empty());
-    if let Some(path) = config_file {
-        read_config(&path, &mut config)?;
-    }
     config.validate()?;
     let listener = TcpListener::bind(&config.listen)?;
     eprintln!(
@@ -46,75 +49,13 @@ fn main() -> io::Result<()> {
     serve(listener, config)
 }
 
-fn read_config(path: &str, config: &mut Config) -> io::Result<()> {
-    for (index, line) in std::fs::read_to_string(path)?.lines().enumerate() {
-        let line = line.split('#').next().unwrap().trim();
-        if line.is_empty() {
-            continue;
-        }
-        let p: Vec<_> = line.split_whitespace().collect();
-        let invalid = || {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "Invalid config row {} (or missing secret environment variable)",
-                    index + 1
-                ),
-            )
-        };
-        // Every row ends with the name of the environment variable holding its secret.
-        let fields = if matches!(p.first(), Some(&"services" | &"sasl")) {
-            4
-        } else {
-            5
-        };
-        if p.len() != fields {
-            return Err(invalid());
-        }
-        let password = env::var(p[fields - 1])
-            .ok()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(invalid)?;
-        match p[0] {
-            "sasl" if config.sasl.is_none() => {
-                config.sasl = Some(keladiircd::SaslConfig {
-                    address: p[1].into(),
-                    path: p[2].into(),
-                    token: password,
-                })
-            }
-            "services" => config.services.push(keladiircd::ServicesConfig {
-                name: p[1].into(),
-                incoming_ip: p[2].parse().map_err(|_| invalid())?,
-                password,
-            }),
-            "oper" => config.opers.push(keladiircd::OperConfig {
-                name: p[1].into(),
-                host: p[2].into(),
-                class: keladiircd::OperClass::parse(p[3]).ok_or_else(invalid)?,
-                password,
-            }),
-            "link" => config.links.push(keladiircd::LinkConfig {
-                name: p[1].into(),
-                address: if p[2] == "-" {
-                    None
-                } else {
-                    Some(p[2].parse().map_err(|_| invalid())?)
-                },
-                incoming_ip: p[3].parse().map_err(|_| invalid())?,
-                password,
-            }),
-            _ => return Err(invalid()),
-        }
-    }
-    Ok(())
+fn missing(option: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("Missing value for {option}"),
+    )
 }
 
 fn value(args: &mut impl Iterator<Item = String>, option: &str) -> io::Result<String> {
-    args.next().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("Missing value for {option}"),
-        )
-    })
+    args.next().ok_or_else(|| missing(option))
 }

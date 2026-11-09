@@ -1,0 +1,36 @@
+# alpha is the hub: beta, cypher and Anope all connect to it.
+# Secrets come from the environment (see .env.example and compose.yaml).
+
+name = "alpha.irc.test"
+description = "alpha hub"
+listen = "0.0.0.0:6667"
+link_listen = "0.0.0.0:7000"
+
+# Links match on IP addresses, which is why compose.yaml gives every container a fixed one.
+[[link]]
+name = "beta.irc.test"
+incoming_ip = "172.30.0.11"
+password_env = "BETA_LINK_SECRET"
+
+[[link]]
+name = "cypher.irc.test"
+incoming_ip = "172.30.0.12"
+password_env = "CYPHER_LINK_SECRET"
+
+# Anope links in with its ngircd protocol module.
+[[services]]
+name = "services.irc.test"
+incoming_ip = "172.30.0.20"
+password_env = "SERVICES_SECRET"
+
+# SASL logins are checked against Anope's JSON-RPC interface.
+[sasl]
+address = "172.30.0.20:8080"
+token_env = "RPC_TOKEN"
+
+# 172.30.0.1 is the Docker gateway: users on the Docker host appear to come from it.
+[[oper]]
+name = "admin"
+ip_mask = "172.30.0.1"
+class = "override"
+password_env = "ALPHA_OPER_SECRET"

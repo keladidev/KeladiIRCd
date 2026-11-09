@@ -38,9 +38,12 @@ class KeladiircdController(BaseServerController, DirectoryBasedController):
         self.hostname = hostname
         self.create_config()
         assert self.directory
-        with self.open_file("keladiircd.conf") as fd:
+        with self.open_file("keladiircd.toml") as fd:
             # irctest's standard operator credentials.
-            fd.write("oper operuser * override IRCTEST_OPER_PASSWORD\n")
+            fd.write(
+                '[[oper]]\nname = "operuser"\nip_mask = "*"\n'
+                'class = "override"\npassword_env = "IRCTEST_OPER_PASSWORD"\n'
+            )
         env = dict(os.environ, IRCTEST_OPER_PASSWORD="operpassword")
         env.pop("KELADIIRCD_PASSWORD", None)
         if password:
@@ -56,7 +59,7 @@ class KeladiircdController(BaseServerController, DirectoryBasedController):
                 "--description",
                 "test server",
                 "--config",
-                self.directory / "keladiircd.conf",
+                self.directory / "keladiircd.toml",
             ],
             env=env,
         )

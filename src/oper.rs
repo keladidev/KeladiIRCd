@@ -103,7 +103,7 @@ impl Server {
     }
 
     /// An action forced on a local user by an operator (SAJOIN/SAPART) or services
-    /// (SVSNICK, login, +R). `source` is the prefix shown for mode changes.
+    /// (SVSNICK, login, +r). `source` is the prefix shown for mode changes.
     /// Joins bypass key, invite, ban and limit modes.
     pub(super) fn force(&mut self, target: u64, msg: &Message, source: &str) {
         let param = msg.params.first().map(String::as_str).unwrap_or("");
@@ -152,12 +152,19 @@ impl Server {
                 let c = &self.clients[&target];
                 let line = format!("{} :is now your displayed host", c.shown());
                 self.numeric(target, 396, &line);
+                if msg.command == "VHOST" {
+                    self.sno('v', &format!("{} is now using vhost {}", c.nick, c.shown()));
+                }
             }
             "UMODE" => {
-                let on = param == "+R";
+                let on = param == "+r";
                 let c = self.clients.get_mut(&target).unwrap();
-                if c.identified != on {
-                    c.identified = on;
+                if c.has('r') != on {
+                    if on {
+                        c.umodes.insert('r');
+                    } else {
+                        c.umodes.remove(&'r');
+                    }
                     let line = format!(":{source} MODE {} :{param}", c.nick);
                     self.send(target, &line);
                 }
@@ -182,6 +189,11 @@ impl Server {
         self.send(target, &format!("ERROR :{reason}"));
         let uid = self.clients[&target].uid.clone();
         self.remember_deleted(&uid);
+        let text = format!(
+            "Received KILL message for {} from {name} ({reason})",
+            self.clients[&target].nick
+        );
+        self.sno('k', &text);
         let remote = self.clients[&target].route.is_some();
         self.disconnect(target, &reason);
         if remote {
@@ -208,10 +220,22 @@ impl Server {
             self.auth_failed(id);
             return;
         }
-        self.clients.get_mut(&id).unwrap().oper = Some(oper.class);
+        let class = oper.class;
+        let c = self.clients.get_mut(&id).unwrap();
+        c.oper = Some(class);
+        // Operators receive WALLOPS (+w), as UnrealIRCd's modes-on-oper does.
+        let modes = if c.umodes.insert('w') { "+ow" } else { "+o" };
         self.numeric(id, 381, ":You are now an IRC operator");
         let c = &self.clients[&id];
-        self.send(id, &format!(":{} MODE {} :+o", c.prefix(), c.nick));
+        self.send(id, &format!(":{} MODE {} :{modes}", c.prefix(), c.nick));
+        let text = format!(
+            "{} (~{}@{}) is now an operator ({})",
+            c.nick,
+            c.user,
+            c.shown(),
+            class.name()
+        );
+        self.sno('o', &text);
         eprintln!("OPER {} logged in from {}", p[0], c.host);
     }
 
@@ -245,7 +269,7 @@ impl Server {
                 let recipients: Vec<_> = self
                     .clients
                     .iter()
-                    .filter(|(_, c)| c.oper.is_some())
+                    .filter(|(_, c)| c.has('w'))
                     .map(|(&id, _)| id)
                     .collect();
                 self.broadcast(

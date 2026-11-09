@@ -1,0 +1,18 @@
+# Server B of the two-server example in README.md.
+# B connects to A's link listener and retries every two seconds after link loss.
+
+name = "b.local"
+listen = "127.0.0.1:6668"
+link_listen = "127.0.0.1:7002"
+
+[[link]]
+name = "a.local"
+connect = "127.0.0.1:7001"
+incoming_ip = "127.0.0.1"
+password_env = "KELADIIRCD_NET_SECRET"
+
+[[oper]]
+name = "admin"
+ip_mask = "127.0.0.1"
+class = "local"
+password_env = "KELADIIRCD_ADMIN_SECRET"
