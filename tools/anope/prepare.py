@@ -8,7 +8,7 @@ and a services operator `alice` (for HostServ SET).
 
 Usage: python -I prepare.py OUT_DIR [--image IMAGE] [--uplink HOST] [--port PORT]
                             [--password SECRET] [--name SERVICES_NAME]
-                            [--rpc-token TOKEN]
+                            [--rpc-token TOKEN] [--root NICK] [--source DIR]
 """
 
 import argparse
@@ -25,16 +25,24 @@ parser.add_argument("--port", type=int, default=7000)
 parser.add_argument("--password", default="services-secret")
 parser.add_argument("--name", default="services.yamircd.test")
 parser.add_argument("--rpc-token", default="rpc-secret")
+parser.add_argument("--root", default="alice",
+                    help="nickname made Services Root without /OPER; '' for none")
+parser.add_argument("--source", type=pathlib.Path,
+                    help="read the example files from this folder instead of --image")
 args = parser.parse_args()
 
-archive = subprocess.run(
-    ["docker", "run", "--rm", "--entrypoint", "sh", args.image, "-c",
-     "cd /anope/conf && tar cf - *.example.conf"],
-    check=True, capture_output=True,
-).stdout
 args.out.mkdir(parents=True, exist_ok=True)
-with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-    tar.extractall(args.out, filter="data")
+if args.source:
+    for example in args.source.glob("*.example.conf"):
+        (args.out / example.name).write_bytes(example.read_bytes())
+else:
+    archive = subprocess.run(
+        ["docker", "run", "--rm", "--entrypoint", "sh", args.image, "-c",
+         "cd /anope/conf && tar cf - *.example.conf"],
+        check=True, capture_output=True,
+    ).stdout
+    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+        tar.extractall(args.out, filter="data")
 
 changes = {
     "anope.example.conf": [
@@ -67,8 +75,8 @@ for name, pairs in changes.items():
             raise SystemExit(f"{name}: expected exactly one {old!r}; has Anope's example changed?")
         text = text.replace(old, new)
     # The main file is loaded as services.conf; the others keep the names it includes.
-    if name == "anope.example.conf":
-        text += '\noper\n{\n\tname = "alice"\n\ttype = "Services Root"\n\trequire_oper = no\n}\n'
+    if name == "anope.example.conf" and args.root:
+        text += f'\noper\n{{\n\tname = "{args.root}"\n\ttype = "Services Root"\n\trequire_oper = no\n}}\n'
     target = args.out / ("services.conf" if name == "anope.example.conf" else name)
     target.write_text(text, encoding="utf-8", newline="\n")
 print(f"Wrote {args.out / 'services.conf'}")

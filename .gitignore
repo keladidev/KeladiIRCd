@@ -1,3 +1,4 @@
 /target/
 /.tools/
 /anope-conf/
+/docker/.env

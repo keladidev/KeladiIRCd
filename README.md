@@ -29,6 +29,9 @@ $env:CARGO_HOME = Join-Path $PWD '.tools/cargo'
 & ./.tools/cargo/bin/cargo.exe run --release
 ```
 
+To run a whole network in Docker (three linked servers, alpha, beta and cypher,
+plus Anope), see [docker/README.md](docker/README.md).
+
 ## Supported behavior
 
 - `NICK`, `USER`, `PASS`, `CAP LS/LIST/REQ/END`, `PING`, `PONG`, `QUIT`.

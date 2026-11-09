@@ -1,0 +1,98 @@
+# Three linked YamIRCd servers and Anope. See docker/README.md.
+#
+#   beta ──┐
+#          ├── alpha ── anope (services.irc.test)
+#   cypher ┘
+name: yamircd
+
+x-yamircd: &yamircd
+  build:
+    context: ..
+    dockerfile: docker/yamircd.Dockerfile
+  image: yamircd:local
+  init: true # so Ctrl+C and `docker compose down` stop it at once
+  restart: unless-stopped
+
+services:
+  alpha:
+    <<: *yamircd
+    command: >-
+      --name alpha.irc.test --description "alpha hub"
+      --listen 0.0.0.0:6667 --link-listen 0.0.0.0:7000
+      --config /etc/yamircd.conf
+    environment:
+      BETA_LINK_SECRET: ${BETA_LINK_SECRET:?copy .env.example to .env}
+      CYPHER_LINK_SECRET: ${CYPHER_LINK_SECRET:?copy .env.example to .env}
+      SERVICES_SECRET: ${SERVICES_SECRET:?copy .env.example to .env}
+      RPC_TOKEN: ${RPC_TOKEN:?copy .env.example to .env}
+    volumes:
+      - ./alpha.conf:/etc/yamircd.conf:ro
+    ports:
+      - 127.0.0.1:6667:6667
+    networks:
+      irc:
+        ipv4_address: 172.30.0.10
+
+  beta:
+    <<: *yamircd
+    command: >-
+      --name beta.irc.test --description "beta leaf"
+      --listen 0.0.0.0:6667 --link-listen 0.0.0.0:7000
+      --config /etc/yamircd.conf
+    environment:
+      BETA_LINK_SECRET: ${BETA_LINK_SECRET:?copy .env.example to .env}
+      RPC_TOKEN: ${RPC_TOKEN:?copy .env.example to .env}
+    volumes:
+      - ./beta.conf:/etc/yamircd.conf:ro
+    ports:
+      - 127.0.0.1:6668:6667
+    networks:
+      irc:
+        ipv4_address: 172.30.0.11
+    depends_on: [alpha]
+
+  cypher:
+    <<: *yamircd
+    command: >-
+      --name cypher.irc.test --description "cypher leaf"
+      --listen 0.0.0.0:6667 --link-listen 0.0.0.0:7000
+      --config /etc/yamircd.conf
+    environment:
+      CYPHER_LINK_SECRET: ${CYPHER_LINK_SECRET:?copy .env.example to .env}
+      RPC_TOKEN: ${RPC_TOKEN:?copy .env.example to .env}
+    volumes:
+      - ./cypher.conf:/etc/yamircd.conf:ro
+    ports:
+      - 127.0.0.1:6669:6667
+    networks:
+      irc:
+        ipv4_address: 172.30.0.12
+    depends_on: [alpha]
+
+  anope:
+    build:
+      context: ../tools/anope
+      target: network
+      args:
+        UPLINK: 172.30.0.10
+        SERVICES_NAME: services.irc.test
+    image: yamircd-anope:local
+    restart: unless-stopped
+    environment:
+      SERVICES_SECRET: ${SERVICES_SECRET:?copy .env.example to .env}
+      RPC_TOKEN: ${RPC_TOKEN:?copy .env.example to .env}
+    volumes:
+      - anope-data:/anope/data # NickServ/ChanServ registrations survive restarts
+    networks:
+      irc:
+        ipv4_address: 172.30.0.20
+    depends_on: [alpha]
+
+networks:
+  irc:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+volumes:
+  anope-data:

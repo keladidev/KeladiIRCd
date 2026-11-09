@@ -1,0 +1,5 @@
+target
+.tools
+.git
+anope-conf
+docker/.env
