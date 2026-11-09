@@ -43,7 +43,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: keladiircd-*.*
+          path: |
+            keladiircd-*.tar.gz
+            keladiircd-*.zip
 
   release:
     needs: build
@@ -52,7 +54,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
-      - run: sha256sum keladiircd-* > SHA256SUMS
-      - run: gh release create "$GITHUB_REF_NAME" keladiircd-* SHA256SUMS --repo "$GITHUB_REPOSITORY" --generate-notes
+      - run: sha256sum keladiircd-*.tar.gz keladiircd-*.zip > SHA256SUMS
+      - run: gh release create "$GITHUB_REF_NAME" keladiircd-*.tar.gz keladiircd-*.zip SHA256SUMS --repo "$GITHUB_REPOSITORY" --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}
