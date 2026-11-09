@@ -359,6 +359,8 @@ struct Server {
     next_id: u64,
     links: BTreeMap<u64, network::Link>,
     routes: BTreeMap<String, u64>,
+    /// Uplink, distance and description of every other server, as seen from here.
+    servers: BTreeMap<String, network::ServerInfo>,
     boot: u64,
     disabled_links: BTreeSet<String>,
     handshakes: usize,
@@ -385,6 +387,7 @@ impl Server {
             next_id: 0,
             links: BTreeMap::new(),
             routes: BTreeMap::new(),
+            servers: BTreeMap::new(),
             boot: network::millis(),
             disabled_links: BTreeSet::new(),
             handshakes: 0,
@@ -414,12 +417,14 @@ impl Server {
         self.whowas.truncate(MAX_WHOWAS);
     }
 
-    /// Server description for WHOIS/WHOWAS; only this server's is known.
+    /// Server description for WHOIS/WHOWAS.
     fn server_info(&self, server: &str) -> &str {
         if server == self.config.name {
             &self.config.description
         } else {
-            "KeladiIRC server"
+            self.servers
+                .get(server)
+                .map_or("KeladiIRC server", |s| s.description.as_str())
         }
     }
 
@@ -870,11 +875,12 @@ impl Server {
                     364,
                     &format!("{0} {0} :0 {1}", self.config.name, self.config.description),
                 );
-                for name in self.routes.keys() {
+                for name in self.servers_by_distance() {
+                    let s = &self.servers[name];
                     self.numeric(
                         id,
                         364,
-                        &format!("{name} {} :1 KeladiIRC server", self.config.name),
+                        &format!("{name} {} :{} {}", s.uplink, s.hops, s.description),
                     );
                 }
                 self.numeric(id, 365, "* :End of /LINKS list");

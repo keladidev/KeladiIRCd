@@ -50,6 +50,7 @@ impl Daemon {
                 "--config",
             ])
             .arg(&path)
+            .args(["--description", &format!("Server {name}")])
             .env_remove("KELADIIRCD_PASSWORD")
             .env("TEST_LINK_SECRET", "link-secret")
             .env("TEST_OPER_SECRET", "oper-secret")
@@ -177,7 +178,7 @@ fn link_handshake(
     let mut reader = BufReader::new(socket.try_clone().unwrap());
     let ours = "0123456789abcdef0123456789abcdef";
     socket
-        .write_all(format!("KELADILINK 3 {name} {ours} {}\r\n", hex(known)).as_bytes())
+        .write_all(format!("KELADILINK 4 {name} {ours} {}\r\n", hex(known)).as_bytes())
         .unwrap();
     let mut challenge = String::new();
     reader.read_line(&mut challenge).unwrap();
@@ -431,7 +432,7 @@ fn linked_servers_burst_remote_chat_operator_permissions_and_split() {
     // A correct proof is answered with the server's own proof, then cycles are refused.
     let (_cyclic, mut reader, hello) =
         link_handshake(&link_a, "b.test", "link-secret", "b.test,a.test");
-    assert!(hello.starts_with("KELADILINK 3 a.test "), "{hello}");
+    assert!(hello.starts_with("KELADILINK 4 a.test "), "{hello}");
     assert!(
         !hello.contains("6c696e6b2d736563726574"),
         "The secret crossed the wire"
@@ -457,6 +458,24 @@ fn linked_servers_burst_remote_chat_operator_permissions_and_split() {
         reader.read(&mut data).unwrap(),
         0,
         "Peer claimed a user owned by the local server"
+    );
+
+    // A server behind an uplink the peer never introduced is refused.
+    let (mut forged, mut reader, _) = link_handshake(&link_a, "b.test", "link-secret", "b.test");
+    loop {
+        let mut line = String::new();
+        assert!(reader.read_line(&mut line).unwrap() > 0);
+        if line == "END\r\n" {
+            break;
+        }
+    }
+    forged
+        .write_all(b"SERVER b.test - 0 -\r\nSERVER x.test nowhere.test 1 -\r\n")
+        .unwrap();
+    assert_eq!(
+        reader.read(&mut data).unwrap(),
+        0,
+        "Peer introduced a server behind an unknown uplink"
     );
 
     let (_b, addr_b, link_b) = Daemon::network("b.test", &format!("link a.test {link_a} 127.0.0.1 TEST_LINK_SECRET\nlink c.test - 127.0.0.1 TEST_LINK_SECRET\noper local 127.0.0.1 local TEST_OPER_SECRET\noper restricted 192.0.2.* global TEST_OPER_SECRET\n"));
@@ -576,6 +595,19 @@ fn linked_servers_burst_remote_chat_operator_permissions_and_split() {
     alice.send("LINKS");
     let links = alice.until(" 365 ");
     assert_eq!(links.iter().filter(|s| s.contains(" 364 ")).count(), 3);
+    // Each server's uplink, distance and own description reach the whole network.
+    for expected in [
+        " 364 Alice a.test a.test :0 Server a.test",
+        " 364 Alice b.test a.test :1 Server b.test",
+        " 364 Alice c.test b.test :2 Server c.test",
+    ] {
+        assert!(links.iter().any(|s| s.ends_with(expected)), "{links:?}");
+    }
+    alice.send("WHOIS Carol");
+    assert!(alice
+        .until(" 318 ")
+        .iter()
+        .any(|s| s.ends_with(" 312 Alice Carol c.test :Server c.test")));
 
     // The KILL reason is optional.
     alice.send("KILL Bob");
@@ -853,7 +885,7 @@ fn services_link_speaks_ngircd_protocol() {
     // The handshake and burst introduce this server, its users and channels.
     let burst = services.sync();
     assert!(burst[0].starts_with("PASS link-secret 0210-IRC+ "));
-    assert_eq!(burst[1], "SERVER a.test 1 :KeladiIRC server");
+    assert_eq!(burst[1], "SERVER a.test 1 :Server a.test");
     for expected in [
         ":a.test NICK Alice 1 guest 127.0.0.1 1 + :Test User",
         ":Alice JOIN #room",

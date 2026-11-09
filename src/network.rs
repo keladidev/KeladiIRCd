@@ -9,8 +9,17 @@ use std::{
 
 const LINK_LINE: usize = 8192;
 pub(super) const LINK_QUEUE: usize = 16384;
-/// Peers must speak the same version; v2 added channel modes, voice and invisibility.
-const PROTOCOL_VERSION: &str = "3";
+/// Peers must speak the same version; v4 added uplinks, hops and descriptions to SERVER.
+const PROTOCOL_VERSION: &str = "4";
+
+/// Another server as seen from this one.
+pub(super) struct ServerInfo {
+    /// The server it is linked behind (this server for a direct peer).
+    pub uplink: String,
+    /// Links between here and there: 1 for a direct peer.
+    pub hops: u32,
+    pub description: String,
+}
 
 #[derive(Clone)]
 pub struct LinkConfig {
@@ -303,11 +312,31 @@ impl Server {
         }
     }
 
+    /// Known servers, nearest first, so every uplink is introduced before what is behind it.
+    pub(super) fn servers_by_distance(&self) -> Vec<&String> {
+        let mut names: Vec<_> = self.servers.keys().collect();
+        names.sort_by_key(|name| self.servers[*name].hops);
+        names
+    }
+
+    /// The SERVER frame for `name` as this server sees it (hops counted from here).
+    pub(super) fn server_frame(&self, name: &str) -> String {
+        match self.servers.get(name) {
+            Some(s) => format!(
+                "SERVER {name} {} {} {}",
+                s.uplink,
+                s.hops,
+                encode(&s.description)
+            ),
+            None => format!("SERVER {name} - 0 {}", encode(&self.config.description)),
+        }
+    }
+
     pub(super) fn burst(&self, link: u64) {
-        self.link_send(link, &format!("SERVER {}", self.config.name));
-        for name in self.routes.keys() {
-            if self.routes[name] != link {
-                self.link_send(link, &format!("SERVER {name}"));
+        self.link_send(link, &self.server_frame(&self.config.name));
+        for name in self.servers_by_distance() {
+            if self.routes.get(name) != Some(&link) {
+                self.link_send(link, &self.server_frame(name));
             }
         }
         for (&id, c) in &self.clients {
@@ -381,6 +410,7 @@ impl Server {
         }
         for name in &names {
             self.routes.remove(name);
+            self.servers.remove(name);
         }
         self.net_flood(
             None,
@@ -392,27 +422,48 @@ impl Server {
     fn link_line(&mut self, link: u64, line: &str, bursting: bool) -> Option<()> {
         let p: Vec<_> = line.split(' ').collect();
         match *p.first()? {
-            "SERVER" if p.len() == 2 => {
-                let name = p[1];
-                if name == self.links[&link].name {
-                    return Some(());
-                }
-                if self.routes.get(name) == Some(&link) {
-                    return Some(());
-                }
-                if name == self.config.name
-                    || self.routes.contains_key(name)
-                    || self.routes.len() >= 32
-                    || name.len() > 63
-                    || name.is_empty()
-                    || !name
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b".-".contains(&b))
-                {
+            "SERVER" if p.len() == 5 => {
+                // SERVER <name> <uplink> <hops from the sender> <hex-description>
+                let (name, uplink) = (p[1], p[2]);
+                let hops: u32 = p[3].parse().ok().filter(|h| *h < 32)?;
+                let description = decode(p[4])?;
+                if description.len() > 100 {
                     return None;
                 }
-                self.routes.insert(name.into(), link);
-                self.net_flood(Some(link), line);
+                let peer = self.links[&link].name.clone();
+                // The sender introduces itself first, with no uplink and 0 hops.
+                let uplink = if name == peer {
+                    if uplink != "-" || hops != 0 || self.servers.contains_key(name) {
+                        return None;
+                    }
+                    self.config.name.clone()
+                } else {
+                    if hops == 0
+                        || (uplink != peer && self.routes.get(uplink) != Some(&link))
+                        || !self.servers.contains_key(&peer)
+                    {
+                        return None;
+                    }
+                    if self.routes.get(name) == Some(&link) {
+                        return Some(());
+                    }
+                    if name == self.config.name
+                        || self.routes.contains_key(name)
+                        || self.routes.len() >= 32
+                        || !server_name_valid(name)
+                    {
+                        return None;
+                    }
+                    self.routes.insert(name.into(), link);
+                    uplink.to_string()
+                };
+                let info = ServerInfo {
+                    uplink,
+                    hops: hops + 1,
+                    description,
+                };
+                self.servers.insert(name.into(), info);
+                self.net_flood(Some(link), &self.server_frame(name));
             }
             "USER" if p.len() == 11 => {
                 if self.deleted_users.contains_key(p[1]) {
@@ -691,6 +742,7 @@ impl Server {
                 }
                 for name in names {
                     self.routes.remove(name);
+                    self.servers.remove(name);
                 }
                 self.net_flood(Some(link), line);
             }
@@ -955,7 +1007,8 @@ fn session(
             Link::new(config.name.clone(), tx, socket.try_clone()?, None),
         );
         state.routes.insert(config.name.clone(), id);
-        state.net_flood(Some(id), &format!("SERVER {}", config.name));
+        // The rest of the network hears of the peer from its own SERVER line, which
+        // opens its burst and carries its description.
         state.burst(id);
     }
     eprintln!("Link {} connected", config.name);

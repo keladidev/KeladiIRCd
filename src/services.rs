@@ -225,13 +225,19 @@ impl View {
         let me = server.config.name.as_str();
         let mut out = Vec::new();
         match (p[0], p.len()) {
-            ("SERVER", 2) => {
-                let name = p[1];
+            ("SERVER", 5) => {
+                // Rendered by this server, so the uplink is this server or one
+                // already introduced (bursts go nearest first).
+                let (name, uplink) = (p[1], p[2]);
                 if name != me && name != self.name && !self.servers.contains_key(name) {
+                    let hops = p[3].parse::<u32>().ok()? + 1;
+                    let description = decode(p[4])?;
                     let token = self.next_token;
                     self.next_token += 1;
                     self.servers.insert(name.into(), token);
-                    out.push(format!(":{me} SERVER {name} 2 {token} :KeladiIRC server"));
+                    out.push(format!(
+                        ":{uplink} SERVER {name} {hops} {token} :{description}"
+                    ));
                 }
             }
             ("USER", 11) => {
@@ -522,7 +528,20 @@ pub(super) fn session(
             link.handles().ok_or_else(|| denied("Socket unavailable"))?;
         state.links.insert(id, link);
         state.routes.insert(config.name.clone(), id);
-        state.net_flood(Some(id), &format!("SERVER {}", config.name));
+        // ngIRCd's SERVER ends with the server's description.
+        let description = match hello.params.as_slice() {
+            [_, .., info] if hello.params.len() >= 3 && !info.is_empty() => {
+                info.chars().take(100).collect()
+            }
+            _ => "Services".to_string(),
+        };
+        let info = network::ServerInfo {
+            uplink: state.config.name.clone(),
+            hops: 1,
+            description,
+        };
+        state.servers.insert(config.name.clone(), info);
+        state.net_flood(Some(id), &state.server_frame(&config.name));
         // The services server's own commands run as this hidden, unregistered client.
         let uid = format!("{}!0!0", config.name);
         let mut c = Client::new(

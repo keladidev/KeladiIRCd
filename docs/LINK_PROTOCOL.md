@@ -1,4 +1,4 @@
-# KeladiIRCd server protocol, version 3
+# KeladiIRCd server protocol, version 4
 
 This is a KeladiIRCd-specific protocol. It does **not** implement UnrealIRCd's
 `PROTOCTL`, `UID`, `SJOIN`, or other UnrealIRCd wire formats, and cannot link
@@ -24,10 +24,10 @@ the wire and a recorded handshake cannot be replayed. Nonces are 32 lowercase he
 digits, fresh for every connection.
 
 ```text
-connecting -> KELADILINK 3 <server-name> <nonce-c> <hex-comma-separated-known-server-names>
+connecting -> KELADILINK 4 <server-name> <nonce-c> <hex-comma-separated-known-server-names>
 accepting  -> CHALLENGE <nonce-a>
 connecting -> PROOF <HMAC-SHA256(secret, "KELADILINK connect <nonce-a> <nonce-c> <connecting-name>")>
-accepting  -> KELADILINK 3 <server-name> <nonce-a> <hex-known-server-names>
+accepting  -> KELADILINK 4 <server-name> <nonce-a> <hex-known-server-names>
               <HMAC-SHA256(secret, "KELADILINK accept <nonce-c> <nonce-a> <accepting-name>")>
 ```
 
@@ -40,7 +40,8 @@ collect one connecting proof to attack offline, so use long random secrets.
 Both peers must speak the same version: version 2 added channel modes, voice,
 invisible users, invitations, accounts and this handshake; version 3 added
 vhosts to USER, the registered channel mode `r`, and the acting user to CHAN and
-MEMBER (so services see who kicked or changed modes). Versions do not link with
+MEMBER (so services see who kicked or changed modes); version 4 added each
+server's uplink, distance and description to SERVER. Versions do not link with
 each other. Frames after the handshake are hex-framed, **not encrypted**. Use
 private loopback links or an encrypted tunnel for remote links
 ([TLS.md](TLS.md) shows stunnel).
@@ -49,7 +50,8 @@ announce operators.
 
 Each frame ends in CRLF and is at most 8192 bytes before CRLF. Variable text
 fields use lowercase UTF-8 hex; `-` represents the empty string. NUL, CR, and LF
-inside decoded text are invalid. Input lines have a ten-second read deadline;
+inside decoded text are invalid. Each line must finish arriving within ten
+seconds of its first byte;
 malformed frames disconnect the peer. Each link has a bounded 16384-frame queue.
 Idle links exchange PING/PONG and disconnect after a further unanswered timeout.
 
@@ -61,7 +63,7 @@ a user owned by the receiver or by another branch of the tree.
 
 | Frame | Fields after command | Purpose |
 | --- | --- | --- |
-| SERVER | name | Introduce a reachable server |
+| SERVER | name uplink hops hex-description | Introduce a reachable server, as the sender sees it: hops counts links from the sender, and the receiver adds one and re-sends the frame from its own view. The sender introduces itself first, as `SERVER <own-name> - 0 <description>`; every other server's uplink must already be known through the same link. Descriptions are at most 100 bytes |
 | USER | uid hex-nick hex-user hex-host hex-realname hex-away oper-class hex-modes hex-account hex-vhost | Introduce/update a user; class is `-`, `local`, `global`, or `override`; modes are letters from `iR` (invisible, identified); the host is an IP or, for service bots, a hostname; the vhost (empty for none) is the host others see |
 | CHAN | hex-name revision revision-server hex-flags hex-key limit hex-topic hex-setter topic-time created hex-comma-separated-bans actor | Replicate channel metadata; flags are letters from `imnrst`, limit 0 = none; actor is the uid whose command made the change, or `-` (bursts) |
 | MEMBER | hex-channel uid status revision revision-server actor hex-kick-reason | Add/update membership; status bits 1 = operator, 2 = voice (0-3), `-` = removal; actor as for CHAN; a removal by KICK carries the reason, otherwise `-` |
@@ -76,7 +78,7 @@ a user owned by the receiver or by another branch of the tree.
 | END | none | Complete the initial state burst |
 | PING / PONG | none | Check link liveness |
 
-Initial bursts send servers, users, channel metadata, memberships, and network
+Initial bursts send servers (nearest first), users, channel metadata, memberships, and network
 bans, followed by END. Existing local clients see remote JOINs during a burst. Live state frames
 flood the tree except their incoming link. WIRE, FORCE and INVITED follow only the target's
 route, avoiding broadcast loops. Client identity prefixes come from session state.
